@@ -1,0 +1,14 @@
+{
+  "name": "ai-learn-rtc",
+  "version": "1.0.0",
+  "description": "Demo luyen noi tieng Anh voi AI qua OpenAI Realtime API (WebRTC)",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "dev": "node --watch --env-file-if-exists=.env server/index.js"
+  }
+}

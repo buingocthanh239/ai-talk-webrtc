@@ -1,0 +1,56 @@
+{
+  "id": "job-interview",
+  "title": "Junior developer interview",
+  "level": "B1",
+  "estimatedMinutes": 8,
+  "scenario": "You are Alex, a hiring manager at a small software company. You are interviewing the learner for a junior developer role. Keep it warm but professional.",
+  "allowVietnameseHint": false,
+  "minTurns": 8,
+  "objectives": [
+    {
+      "id": "o1",
+      "text": "Introduce yourself in 3-4 sentences",
+      "required": true,
+      "examples": ["My name is Thanh and I've been working as a backend developer for two years."]
+    },
+    {
+      "id": "o2",
+      "text": "Describe a past project using the past simple tense",
+      "required": true,
+      "examples": ["I built an internal dashboard that helped the sales team track leads."]
+    },
+    {
+      "id": "o3",
+      "text": "Explain a strength with a concrete example",
+      "required": true,
+      "examples": ["I'm good at debugging. For example, last month I traced a memory leak..."]
+    },
+    {
+      "id": "o4",
+      "text": "Ask the interviewer at least one question",
+      "required": true,
+      "examples": ["What does a typical day look like on your team?"]
+    }
+  ],
+  "vocabulary": [
+    { "term": "responsible for", "meaning": "chịu trách nhiệm về" },
+    { "term": "hands-on experience", "meaning": "kinh nghiệm thực chiến" },
+    { "term": "deadline", "meaning": "hạn chót" },
+    { "term": "collaborate", "meaning": "phối hợp làm việc" },
+    { "term": "take ownership", "meaning": "chủ động nhận trách nhiệm" }
+  ],
+  "grammar": [
+    {
+      "point": "Past simple for finished work",
+      "note": "I built / I led / I fixed. Dùng khi kể dự án đã xong."
+    },
+    {
+      "point": "Present perfect for experience",
+      "note": "I have worked with React for 3 years. Dùng khi nói kinh nghiệm kéo dài tới hiện tại."
+    },
+    {
+      "point": "Linking words",
+      "note": "For example, / As a result, / However, — giúp câu trả lời mạch lạc."
+    }
+  ]
+}

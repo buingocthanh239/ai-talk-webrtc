@@ -1,0 +1,56 @@
+{
+  "id": "cafe-order",
+  "title": "Ordering at a café",
+  "level": "A2",
+  "estimatedMinutes": 6,
+  "scenario": "You are Mia, a friendly barista at a small coffee shop in Melbourne. The learner is a customer who just walked in.",
+  "allowVietnameseHint": true,
+  "minTurns": 6,
+  "objectives": [
+    {
+      "id": "o1",
+      "text": "Order a drink using a full polite sentence",
+      "required": true,
+      "examples": ["I'd like a latte, please.", "Can I have a flat white?"]
+    },
+    {
+      "id": "o2",
+      "text": "Ask for the price and understand the answer",
+      "required": true,
+      "examples": ["How much is that?", "How much does it cost?"]
+    },
+    {
+      "id": "o3",
+      "text": "Answer a follow-up question from the barista (size, dine-in or takeaway)",
+      "required": true,
+      "examples": ["To go, please.", "Medium, thanks."]
+    },
+    {
+      "id": "o4",
+      "text": "Close the conversation politely",
+      "required": false,
+      "examples": ["Thanks a lot, have a good day!"]
+    }
+  ],
+  "vocabulary": [
+    { "term": "latte", "meaning": "cà phê sữa kiểu Ý" },
+    { "term": "to go / takeaway", "meaning": "mang đi" },
+    { "term": "receipt", "meaning": "hoá đơn" },
+    { "term": "change", "meaning": "tiền thối" },
+    { "term": "regular / large", "meaning": "cỡ thường / cỡ lớn" }
+  ],
+  "grammar": [
+    {
+      "point": "would like + noun",
+      "note": "Lịch sự hơn 'I want'. VD: I'd like a latte, please."
+    },
+    {
+      "point": "Can I have ...?",
+      "note": "Dùng để gọi món hoặc xin gì đó một cách lịch sự."
+    },
+    {
+      "point": "How much is / are ...?",
+      "note": "Hỏi giá. VD: How much is a large latte?"
+    }
+  ]
+}
