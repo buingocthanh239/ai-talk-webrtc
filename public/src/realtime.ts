@@ -4,23 +4,66 @@
  */
 const CALLS_URL = 'https://api.openai.com/v1/realtime/calls';
 
-export class RealtimeConnection {
-  #pc = null;
-  #dc = null;
-  #micStream = null;
-  #closing = false;
+/**
+ * Event tu Realtime API. Chi khai bao cac truong ma code nay that su doc —
+ * ta khong so huu hinh dang nay, no do OpenAI dinh nghia va con doi theo
+ * phien ban, nen mo ta het la vua thua vua nhanh sai.
+ */
+export interface RealtimeEvent {
+  type: string;
+  delta?: string;
+  transcript?: string;
+  item_id?: string;
+  call_id?: string;
+  name?: string;
+  arguments?: string;
+  error?: unknown;
+  response?: {
+    id?: string;
+    metadata?: { purpose?: string };
+    output?: { content?: { type?: string; text?: string; transcript?: string }[] }[];
+  };
+}
 
-  constructor({ onEvent, onRemoteStream, onDisconnect }) {
+export interface RealtimeHandlers {
+  onEvent?: (event: RealtimeEvent) => void;
+  onRemoteStream?: (stream: MediaStream) => void;
+  onDisconnect?: (state: RTCPeerConnectionState) => void;
+}
+
+export class RealtimeConnection {
+  #pc: RTCPeerConnection | null = null;
+  #dc: RTCDataChannel | null = null;
+  #micStream: MediaStream | null = null;
+  #closing = false;
+  #callId: string | null = null;
+
+  onEvent?: RealtimeHandlers['onEvent'];
+  onRemoteStream?: RealtimeHandlers['onRemoteStream'];
+  onDisconnect?: RealtimeHandlers['onDisconnect'];
+
+  constructor({ onEvent, onRemoteStream, onDisconnect }: RealtimeHandlers) {
     this.onEvent = onEvent;
     this.onRemoteStream = onRemoteStream;
     this.onDisconnect = onDisconnect;
   }
 
-  get micStream() {
+  get micStream(): MediaStream | null {
     return this.#micStream;
   }
 
-  async connect({ clientSecret, micStream }) {
+  /** Id cuoc goi ben OpenAI. Server can no de hen gio cat. */
+  get callId(): string | null {
+    return this.#callId;
+  }
+
+  async connect({
+    clientSecret,
+    micStream,
+  }: {
+    clientSecret: string;
+    micStream: MediaStream;
+  }): Promise<void> {
     this.#closing = false;
     this.#micStream = micStream;
 
@@ -29,7 +72,10 @@ export class RealtimeConnection {
     });
     this.#pc = pc;
 
-    pc.ontrack = (e) => this.onRemoteStream?.(e.streams[0]);
+    pc.ontrack = (e) => {
+      const stream = e.streams[0];
+      if (stream) this.onRemoteStream?.(stream);
+    };
 
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
@@ -47,10 +93,10 @@ export class RealtimeConnection {
 
     const dc = pc.createDataChannel('oai-events');
     this.#dc = dc;
-    dc.addEventListener('message', (e) => {
-      let event;
+    dc.addEventListener('message', (e: MessageEvent<string>) => {
+      let event: RealtimeEvent;
       try {
-        event = JSON.parse(e.data);
+        event = JSON.parse(e.data) as RealtimeEvent;
       } catch {
         return;
       }
@@ -63,7 +109,7 @@ export class RealtimeConnection {
 
     const res = await fetch(CALLS_URL, {
       method: 'POST',
-      body: pc.localDescription.sdp,
+      body: pc.localDescription?.sdp ?? offer.sdp,
       headers: {
         Authorization: `Bearer ${clientSecret}`,
         'Content-Type': 'application/sdp',
@@ -76,24 +122,28 @@ export class RealtimeConnection {
       throw new Error(`SDP exchange that bai (${res.status}): ${detail}`);
     }
 
+    // Location: /v1/realtime/calls/rtc_xxx — day la duong duy nhat lay duoc
+    // call_id. Server can no de goi hangup, nen dung vut response headers di.
+    this.#callId = res.headers.get('Location')?.split('/').pop() ?? null;
+
     await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() });
     await waitForDataChannel(dc);
   }
 
-  send(event) {
+  send(event: Record<string, unknown>): boolean {
     if (this.#dc?.readyState !== 'open') return false;
     this.#dc.send(JSON.stringify(event));
     return true;
   }
 
-  setMicEnabled(enabled) {
+  setMicEnabled(enabled: boolean): void {
     this.#micStream?.getAudioTracks().forEach((t) => {
       t.enabled = enabled;
     });
   }
 
   /** Dong chu dong — khong kich hoat luong reconnect. */
-  close() {
+  close(): void {
     this.#closing = true;
     try {
       this.#dc?.close();
@@ -110,9 +160,9 @@ export class RealtimeConnection {
   }
 }
 
-function waitForIceGathering(pc, timeoutMs = 2000) {
+function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 2000): Promise<void> {
   if (pc.iceGatheringState === 'complete') return Promise.resolve();
-  return new Promise((resolve) => {
+  return new Promise<void>((resolve) => {
     const done = () => {
       pc.removeEventListener('icegatheringstatechange', check);
       clearTimeout(timer);
@@ -125,9 +175,9 @@ function waitForIceGathering(pc, timeoutMs = 2000) {
   });
 }
 
-function waitForDataChannel(dc, timeoutMs = 10000) {
+function waitForDataChannel(dc: RTCDataChannel, timeoutMs = 10000): Promise<void> {
   if (dc.readyState === 'open') return Promise.resolve();
-  return new Promise((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Data channel khong mo duoc')), timeoutMs);
     dc.addEventListener(
       'open',

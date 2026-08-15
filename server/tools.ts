@@ -5,7 +5,16 @@
  * Vi vay khong co tool nao tu dong ket thuc buoi hoc — end_lesson chi
  * bat nut "Ket thuc" tren UI cho user bam.
  */
-export function buildTools(lesson) {
+import type { Lesson } from '../shared/types.ts';
+
+export interface RealtimeTool {
+  type: 'function';
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export function buildTools(lesson: Lesson): RealtimeTool[] {
   const objectiveIds = lesson.objectives.map((o) => o.id);
 
   return [

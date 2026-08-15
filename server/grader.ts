@@ -1,6 +1,12 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { AUDIO_DIR } from './db.js';
+import { AUDIO_DIR } from './db.ts';
+
+import type { Lesson, Message, ProgressRecord, Summary } from '../shared/types.ts';
+import type { SessionRow } from './db.ts';
+
+/** Message kem duong dan file wav tren dia — chi khau cham diem moi can. */
+export type GradingMessage = Message & { audioPath: string | null };
 
 const API = 'https://api.openai.com/v1/chat/completions';
 
@@ -84,7 +90,32 @@ const AUDIO_SCHEMA = {
   additionalProperties: false,
 };
 
-async function callOpenAI(body) {
+interface ChatCompletion {
+  choices?: { message?: { content?: string } }[];
+}
+
+/**
+ * Ket qua cham. Hinh dang nay do TEXT_SCHEMA / AUDIO_SCHEMA phia duoi ep buoc
+ * (json_schema strict), nen ep kieu o day la co can cu chu khong phai doan.
+ */
+export interface TextGrade {
+  grammar: number;
+  vocabulary: number;
+  fluency: number;
+  objectives: { id: string; passed: boolean; evidence?: string }[];
+  mistakes: Summary['mistakes'];
+  strengths: string[];
+  next_focus: string[];
+  coach_note_vi: string;
+}
+
+export interface AudioGrade {
+  pronunciation: number;
+  segments: { message_seq: number; score: number; issues: string[] }[];
+  note_vi: string;
+}
+
+async function callOpenAI<T>(body: Record<string, unknown>): Promise<T> {
   const res = await fetch(API, {
     method: 'POST',
     headers: {
@@ -96,13 +127,13 @@ async function callOpenAI(body) {
   if (!res.ok) {
     throw new Error(`OpenAI ${res.status}: ${(await res.text()).slice(0, 400)}`);
   }
-  const json = await res.json();
+  const json = (await res.json()) as ChatCompletion;
   const content = json.choices?.[0]?.message?.content;
   if (!content) throw new Error('OpenAI tra ve response rong');
-  return JSON.parse(content);
+  return JSON.parse(content) as T;
 }
 
-function renderTranscript(messages) {
+function renderTranscript(messages: GradingMessage[]): string {
   return messages
     .filter((m) => m.text?.trim())
     .map((m) => `[${m.seq}] ${m.role === 'user' ? 'LEARNER' : 'COACH'}: ${m.text}`)
@@ -110,7 +141,11 @@ function renderTranscript(messages) {
 }
 
 /** Cham grammar / vocabulary / objectives tren transcript text. */
-async function gradeText(lesson, messages, progress) {
+async function gradeText(
+  lesson: Lesson,
+  messages: GradingMessage[],
+  progress: ProgressRecord[]
+): Promise<TextGrade> {
   const model = process.env.GRADER_TEXT_MODEL || 'gpt-4o';
 
   const objectiveList = lesson.objectives
@@ -157,19 +192,28 @@ Grade ONLY the LEARNER's turns. Rules:
  * Day la ly do phai ghi audio theo tung message: cham phat am tu transcript text
  * la khong dang tin, vi ASR da "sua ho" nguoi hoc roi.
  */
-async function gradeAudio(lesson, messages) {
+async function gradeAudio(
+  lesson: Lesson,
+  messages: GradingMessage[]
+): Promise<AudioGrade | null> {
   const model = process.env.GRADER_AUDIO_MODEL;
   if (!model) return null;
 
   const segments = messages
-    .filter((m) => m.role === 'user' && m.audioPath && (m.durationMs ?? 0) > 700)
+    .filter((m): m is GradingMessage & { audioPath: string } =>
+      Boolean(m.role === 'user' && m.audioPath && (m.durationMs ?? 0) > 700)
+    )
     .sort((a, b) => (b.durationMs ?? 0) - (a.durationMs ?? 0))
     .slice(0, MAX_AUDIO_SEGMENTS)
     .sort((a, b) => a.seq - b.seq);
 
   if (segments.length === 0) return null;
 
-  const content = [
+  type AudioPart =
+    | { type: 'text'; text: string }
+    | { type: 'input_audio'; input_audio: { data: string; format: 'wav' } };
+
+  const content: AudioPart[] = [
     {
       type: 'text',
       text:
@@ -207,7 +251,17 @@ async function gradeAudio(lesson, messages) {
  * Cham ca buoi hoc. Phan audio va phan text chay song song va doc lap:
  * neu cham phat am hong thi van tra ve duoc summary text.
  */
-export async function gradeSession({ lesson, session, messages, progress }) {
+export async function gradeSession({
+  lesson,
+  session,
+  messages,
+  progress,
+}: {
+  lesson: Lesson;
+  session: SessionRow;
+  messages: GradingMessage[];
+  progress: ProgressRecord[];
+}): Promise<Summary> {
   const learnerTurns = messages.filter((m) => m.role === 'user' && m.text?.trim());
 
   if (learnerTurns.length === 0) {
@@ -239,9 +293,9 @@ export async function gradeSession({ lesson, session, messages, progress }) {
   }
   const text = textResult.value;
 
-  let pronunciation = null;
-  let pronunciationSegments = [];
-  let pronunciationNoteVi = null;
+  let pronunciation: number | null = null;
+  let pronunciationSegments: AudioGrade['segments'] = [];
+  let pronunciationNoteVi: string | undefined;
   if (audioResult.status === 'fulfilled' && audioResult.value) {
     pronunciation = audioResult.value.pronunciation;
     pronunciationSegments = audioResult.value.segments;

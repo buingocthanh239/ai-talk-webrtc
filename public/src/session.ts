@@ -1,6 +1,55 @@
-import { api } from './api.js';
-import { RealtimeConnection } from './realtime.js';
-import { TrackRecorder } from './recorder.js';
+import { api, ApiError } from './api.ts';
+import { RealtimeConnection } from './realtime.ts';
+import type { RealtimeEvent } from './realtime.ts';
+import { TrackRecorder } from './recorder.ts';
+
+import type {
+  Lesson,
+  ObjectiveProgress,
+  ProgressRecord,
+  ProgressStatus,
+  Quota,
+  Role,
+  SeedItem,
+} from '../../shared/types.ts';
+
+/** Trang thai nut push-to-talk. Chi 'ready' moi cho bat dau noi. */
+export type PttState = 'locked' | 'ready' | 'recording' | 'thinking' | 'ai';
+
+export type SpeakingWho = 'user' | 'ai' | null;
+
+export interface SessionHandlers {
+  status: (state: string, detail?: Record<string, unknown>) => void;
+  speaking: (who: SpeakingWho) => void;
+  message: (m: { seq: number; role: Role; text: string; pending: boolean }) => void;
+  messageUpdate: (seq: number, text: string, opts?: { pending?: boolean }) => void;
+  messageRemove: (seq: number) => void;
+  messageAudio: (seq: number, url: string, durationMs: number) => void;
+  progress: (list: ObjectiveProgress[]) => void;
+  hints: (list: string[]) => void;
+  hintUsed: (level: number) => void;
+  canFinish: (info: { reason?: string; note?: string }) => void;
+  pttState?: (state: PttState) => void;
+  quota?: (quota: Quota) => void;
+  quotaExhausted?: () => void;
+}
+
+/** Mot luot noi dang cho: moc thoi gian trong recorder de cat WAV ve sau. */
+interface PendingTurn {
+  seq: number;
+  rec: TrackRecorder;
+  startMs: number;
+  endMs: number | null;
+}
+
+interface ActiveResponse {
+  id: string | undefined;
+  seq: number;
+  rec: TrackRecorder | null;
+  startMs: number;
+  endMs?: number;
+  text: string;
+}
 
 /** Lich thu lai khi mat ket noi. */
 const BACKOFF_MS = [800, 2000, 4000, 8000, 15000];
@@ -12,9 +61,13 @@ const PTT_MIN_MS = 300;
 /** Tran an toan: neu khong chot duoc luc AI ngung tieng thi van mo lai nut. */
 const PTT_UNLOCK_FAILSAFE_MS = 8000;
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-const HINT_INSTRUCTIONS = {
+/** `catch (err)` cho ra `unknown` duoi strict — boc mot lan o day. */
+const errorMessage = (err: unknown): string =>
+  err instanceof Error ? err.message : String(err);
+
+const HINT_INSTRUCTIONS: Record<number, string> = {
   1: 'The learner has gone quiet. Do not answer for them. Gently encourage them and rephrase your last question in simpler words. One or two short sentences.',
   2: 'The learner is still stuck. Give them the sentence frame only — the first few words — and let them finish it. Do not say the whole sentence. Keep it under two sentences.',
   3: 'The learner still cannot answer. Say one full model sentence they could use, slowly and clearly, then invite them to repeat it.',
@@ -27,32 +80,49 @@ const HINT_INSTRUCTIONS = {
  * Mat ket noi thi chi mat duong truyen, khong mat buoi hoc.
  */
 export class LessonSession {
-  #conn = null;
-  #ctx = null;
-  #micStream = null;
-  #micRec = null;
-  #aiRec = null;
+  #conn: RealtimeConnection | null = null;
+  #ctx: AudioContext | null = null;
+  #micStream: MediaStream | null = null;
+  #micRec: TrackRecorder | null = null;
+  #aiRec: TrackRecorder | null = null;
 
   #seq = 0;
-  #pendingUser = [];
-  #activeResponse = null;
-  #hintsResponseId = null;
+  #pendingUser: PendingTurn[] = [];
+  #activeResponse: ActiveResponse | null = null;
+  #hintsResponseId: string | null = null;
   #hintsPending = false;
   #hintLevel = 0;
-  #ptt = null;
-  #pttState = 'locked';
-  #unlockTimer = null;
+  #ptt: PendingTurn | null = null;
+  #pttState: PttState = 'locked';
+  #unlockTimer: ReturnType<typeof setTimeout> | null = null;
   #reconnecting = false;
   #ended = false;
   #stopped = false;
-  #progress = new Map();
+  #progress = new Map<string, ProgressRecord>();
+
+  readonly sessionId: string;
+  readonly lesson: Lesson;
+  readonly audioElement: HTMLAudioElement;
+  readonly on: SessionHandlers;
 
   /**
    * startSeq: so luot lon nhat da co trong buoi hoc nay. Bat buoc phai truyen
    * khi hoc tiep mot buoi dang do — db.saveMessage upsert theo (session_id,
    * seq), nen bat dau lai tu 0 se ghi de len chinh cac luot cu.
    */
-  constructor({ sessionId, lesson, audioElement, handlers, startSeq = 0 }) {
+  constructor({
+    sessionId,
+    lesson,
+    audioElement,
+    handlers,
+    startSeq = 0,
+  }: {
+    sessionId: string;
+    lesson: Lesson;
+    audioElement: HTMLAudioElement;
+    handlers: SessionHandlers;
+    startSeq?: number;
+  }) {
     this.sessionId = sessionId;
     this.lesson = lesson;
     this.audioElement = audioElement;
@@ -60,10 +130,72 @@ export class LessonSession {
     this.#seq = startSeq;
   }
 
+  // ------------------------------------------------------------- han muc
+
+  #callId: string | null = null;
+  #presence: EventSource | null = null;
+
+  /**
+   * Bao call_id ve server roi mo kenh presence.
+   *
+   * Kenh nay dut la server cat cuoc goi (co an han), nen no khong phai thu
+   * "nen co" — mat no la mat quyen goi tiep.
+   */
+  async #registerCall(): Promise<void> {
+    const callId = this.#conn?.callId;
+    if (!callId) {
+      console.warn('[quota] khong lay duoc call_id — server se khong hen gio cat duoc');
+      return;
+    }
+    this.#callId = callId;
+
+    try {
+      this.on.quota?.(await api.startCall(this.sessionId, callId));
+    } catch (err) {
+      console.warn('[quota] khong dang ky duoc cuoc goi:', errorMessage(err));
+    }
+
+    this.#openPresence(callId);
+  }
+
+  #openPresence(callId: string): void {
+    this.#closePresence();
+    // EventSource tu ket noi lai khi mang chop — dung tu viet vong retry.
+    const es = new EventSource(`/api/calls/${callId}/presence`);
+    this.#presence = es;
+
+    es.addEventListener('sync', (e) => {
+      try {
+        this.on.quota?.(JSON.parse((e as MessageEvent<string>).data) as Quota);
+      } catch {
+        /* bo qua goi tin hong */
+      }
+    });
+
+    es.addEventListener('ended', () => {
+      this.#closePresence();
+      this.#onQuotaCut();
+    });
+  }
+
+  #closePresence(): void {
+    this.#presence?.close();
+    this.#presence = null;
+  }
+
+  /** Server da cat vi het gio. Dung han, khong thu ket noi lai. */
+  #onQuotaCut(): void {
+    if (this.#ended) return;
+    this.#ended = true;
+    this.#setPttState('locked');
+    this.#conn?.close();
+    this.on.quotaExhausted?.();
+  }
+
   // ------------------------------------------------------------- lifecycle
 
   /** resume=true: noi lai mot buoi dang do thay vi bat dau tu dau. */
-  async start({ resume = false } = {}) {
+  async start({ resume = false }: { resume?: boolean } = {}): Promise<void> {
     this.on.status('connecting');
 
     this.#micStream = await navigator.mediaDevices.getUserMedia({
@@ -74,14 +206,14 @@ export class LessonSession {
     await this.#ctx.audioWorklet.addModule('/js/pcm-worklet.js');
     if (this.#ctx.state === 'suspended') await this.#ctx.resume();
 
-    this.#micRec = await TrackRecorder.create(this.#ctx, this.#micStream);
+    this.#micRec = await TrackRecorder.create(this.#ctx!, this.#micStream);
 
     await this.#connect({ resume });
     this.on.status('live');
     this.#setPttState('ready');
   }
 
-  async #connect({ resume }) {
+  async #connect({ resume }: { resume: boolean }): Promise<void> {
     const token = await api.getToken(this.sessionId, resume);
 
     for (const p of token.progress ?? []) {
@@ -97,7 +229,7 @@ export class LessonSession {
 
     await this.#conn.connect({
       clientSecret: token.clientSecret,
-      micStream: this.#micStream,
+      micStream: this.#micStream!,
     });
 
     // Push-to-talk: mic im cho toi khi user giu nut. Track van nam trong
@@ -105,15 +237,17 @@ export class LessonSession {
     // lai SDP — re hon nhieu so voi them/bot track.
     this.#conn.setMicEnabled(false);
 
+    await this.#registerCall();
+
     if (resume) await this.#seedConversation(token.seedItems);
   }
 
-  async #attachRemote(stream) {
+  async #attachRemote(stream: MediaStream): Promise<void> {
     this.audioElement.srcObject = stream;
     await this.audioElement.play().catch(() => {});
     // Recorder moi cho moi ket noi — dong ho cua no bat dau lai tu 0,
     // nen moi luot AI phai nho recorder ma no thuoc ve.
-    this.#aiRec = await TrackRecorder.create(this.#ctx, stream);
+    this.#aiRec = await TrackRecorder.create(this.#ctx!, stream);
   }
 
   /**
@@ -121,9 +255,9 @@ export class LessonSession {
    * Phan lich su cu hon da duoc nen thanh tom tat va nhet san trong
    * instructions o server, nen o day khong replay toan bo.
    */
-  async #seedConversation(seedItems) {
+  async #seedConversation(seedItems: SeedItem[] | undefined): Promise<void> {
     for (const item of seedItems ?? []) {
-      this.#conn.send({
+      this.#conn?.send({
         type: 'conversation.item.create',
         item: {
           type: 'message',
@@ -143,7 +277,7 @@ export class LessonSession {
     // mo loi van thuoc ve user.
   }
 
-  async #handleDisconnect(state) {
+  async #handleDisconnect(state: RTCPeerConnectionState): Promise<void> {
     if (this.#ended || this.#reconnecting) return;
     this.#reconnecting = true;
     this.#setPttState('locked');
@@ -168,7 +302,14 @@ export class LessonSession {
         this.#setPttState('ready');
         return;
       } catch (err) {
-        console.warn(`[rtc] thu lai lan ${attempt + 1} that bai:`, err.message);
+        // Het han muc thi thu lai bao nhieu lan cung vo ich, va con hien sai
+        // nguyen nhan cho user suot 30 giay backoff. Dung han o day.
+        if (err instanceof ApiError && err.status === 429) {
+          this.#reconnecting = false;
+          this.#onQuotaCut();
+          return;
+        }
+        console.warn(`[rtc] thu lai lan ${attempt + 1} that bai:`, errorMessage(err));
       }
     }
 
@@ -183,10 +324,21 @@ export class LessonSession {
     if (this.#stopped) return;
     this.#stopped = true;
     this.#ended = true;
-    clearTimeout(this.#unlockTimer);
+    if (this.#unlockTimer) clearTimeout(this.#unlockTimer);
     this.#setPttState('locked');
     this.#ptt = null;
+    this.#closePresence();
     this.#conn?.close();
+
+    // Dong ban ghi ngay thay vi de server doi het an han — dung gio cua user
+    // vao dung luc user thoi goi.
+    if (this.#callId) {
+      api
+        .endCall(this.#callId)
+        .then((quota) => this.on.quota?.(quota))
+        .catch(() => {});
+      this.#callId = null;
+    }
 
     // Doi cac doan audio dang cat/upload kip hoan tat
     await sleep(400);
@@ -207,7 +359,7 @@ export class LessonSession {
 
   // ---------------------------------------------------------------- events
 
-  #handleEvent(event) {
+  #handleEvent(event: RealtimeEvent): void {
     switch (event.type) {
       case 'error':
         console.error('[realtime] server error:', event.error);
@@ -259,7 +411,7 @@ export class LessonSession {
     return this.#pttState;
   }
 
-  #setPttState(state) {
+  #setPttState(state: PttState): void {
     if (this.#pttState === state) return;
     this.#pttState = state;
     this.on.pttState?.(state);
@@ -269,7 +421,7 @@ export class LessonSession {
    * User giu nut — mo mic, bat dau mot luot noi.
    * Tra ve false neu chua den luot (dang ket noi, hoac AI dang noi).
    */
-  startTalking() {
+  startTalking(): boolean {
     if (this.#ended || this.#pttState !== 'ready') return false;
 
     // Trong luc mic tat, buffer phia server van dang nhan khoang lang.
@@ -279,7 +431,7 @@ export class LessonSession {
     this.#conn?.setMicEnabled(true);
 
     const seq = ++this.#seq;
-    this.#ptt = { seq, rec: this.#micRec, startMs: this.#micRec.nowMs(), endMs: null };
+    this.#ptt = { seq, rec: this.#micRec!, startMs: this.#micRec!.nowMs(), endMs: null };
 
     this.#setPttState('recording');
     this.on.speaking('user');
@@ -293,7 +445,7 @@ export class LessonSession {
    * Khong commit ngay lap tuc: goi audio cuoi cung con dang tren duong qua
    * WebRTC, commit som se cut mat duoi cau.
    */
-  async stopTalking() {
+  async stopTalking(): Promise<void> {
     if (this.#pttState !== 'recording') return;
 
     const entry = this.#ptt;
@@ -332,7 +484,7 @@ export class LessonSession {
    * Duong nay khong di qua transcribe nao ca — chu user go chinh la chu, nen
    * no mien nhiem voi chuyen transcribe nghe sot.
    */
-  sendText(raw) {
+  sendText(raw: string): boolean {
     const text = (raw ?? '').trim();
     if (this.#ended || this.#pttState !== 'ready' || !text) return false;
 
@@ -361,7 +513,7 @@ export class LessonSession {
    * Nhuong cho cho mot response moi. Session chi cho mot response chay mot
    * luc, va luot cua user luon uu tien hon goi y chu.
    */
-  #releaseHintsSlot() {
+  #releaseHintsSlot(): void {
     if (this.#hintsResponseId) {
       this.#conn?.send({ type: 'response.cancel', response_id: this.#hintsResponseId });
       this.#hintsResponseId = null;
@@ -372,8 +524,8 @@ export class LessonSession {
   }
 
   /** Mo lai nut sau khi AI da noi het cau. */
-  #unlockPtt() {
-    clearTimeout(this.#unlockTimer);
+  #unlockPtt(): void {
+    if (this.#unlockTimer) clearTimeout(this.#unlockTimer);
     this.#unlockTimer = null;
     if (this.#ended) return;
     if (this.#pttState === 'ai' || this.#pttState === 'thinking') this.#setPttState('ready');
@@ -381,15 +533,20 @@ export class LessonSession {
 
   // ------------------------------------------------------------ user turns
 
-  async #onUserTranscript(text) {
+  async #onUserTranscript(text: string): Promise<void> {
     const entry = this.#pendingUser.shift();
     if (!entry) return;
 
     entry.endMs ??= entry.rec.nowMs();
-    this.on.messageUpdate(entry.seq, text, { pending: false });
+
+    // Transcribe co luc tra ve rong. Bubble trong trong nhu app hong, ma audio
+    // thi van con — noi thang ra la khong nghe ro, va van giu doan ghi de user
+    // bam nghe lai duoc.
+    const heard = text.trim();
+    this.on.messageUpdate(entry.seq, heard || '(không nghe rõ)', { pending: false });
 
     // Noi duoc mot cau tu te thi reset thang goi y ve 0
-    if (text.trim().split(/\s+/).length >= 3) this.#hintLevel = 0;
+    if (heard.split(/\s+/).length >= 3) this.#hintLevel = 0;
 
     await api
       .saveMessage(this.sessionId, {
@@ -405,7 +562,7 @@ export class LessonSession {
 
   // ------------------------------------------------------------- ai turns
 
-  #onResponseCreated(response) {
+  #onResponseCreated(response: RealtimeEvent['response']): void {
     // Response ngoai luong (goi y chu tren man hinh) khong phai mot luot noi.
     //
     // Khong tin vao metadata: server KHONG doi metadata ve trong response.created
@@ -433,7 +590,7 @@ export class LessonSession {
     this.on.message({ seq, role: 'assistant', text: '', pending: true });
   }
 
-  async #onResponseDone(response) {
+  async #onResponseDone(response: RealtimeEvent['response']): Promise<void> {
     const isHints =
       response?.metadata?.purpose === 'hints' ||
       (this.#hintsResponseId !== null && response?.id === this.#hintsResponseId);
@@ -454,7 +611,7 @@ export class LessonSession {
 
     // Nut mo lai trong #finalizeAssistantAudio, khi audio that su het tieng.
     // Day chi la tran an toan phong khi viec do im lang khong chot duoc.
-    clearTimeout(this.#unlockTimer);
+    if (this.#unlockTimer) clearTimeout(this.#unlockTimer);
     this.#unlockTimer = setTimeout(() => this.#unlockPtt(), PTT_UNLOCK_FAILSAFE_MS);
 
     if (!entry.text) entry.text = extractTranscript(response) ?? '';
@@ -468,19 +625,19 @@ export class LessonSession {
     this.#requestHints();
   }
 
-  #onToolCall(event) {
-    let args = {};
+  #onToolCall(event: RealtimeEvent): void {
+    let args: { objective_id?: string; status?: ProgressStatus; evidence?: string; reason?: string; closing_note?: string } = {};
     try {
       args = JSON.parse(event.arguments || '{}');
     } catch {
       return;
     }
 
-    if (event.name === 'mark_objective') {
-      const record = {
+    if (event.name === 'mark_objective' && args.objective_id && args.status) {
+      const record: ProgressRecord = {
         objectiveId: args.objective_id,
         status: args.status,
-        evidence: args.evidence,
+        evidence: args.evidence ?? null,
         messageSeq: this.#seq,
       };
       // Model chi de xuat; client moi la noi chot trang thai va hien thi.
@@ -554,7 +711,7 @@ export class LessonSession {
     });
   }
 
-  #applyHints(response) {
+  #applyHints(response: RealtimeEvent['response']): void {
     const raw = extractText(response);
     if (!raw) return;
     try {
@@ -591,7 +748,7 @@ export class LessonSession {
    * `response.done` chi bao model sinh xong text/audio — audio van dang phat not
    * qua WebRTC. Doi den khi im lang moi cat, neu khong se hut mat duoi cau.
    */
-  async #finalizeAssistantAudio(entry) {
+  async #finalizeAssistantAudio(entry: ActiveResponse): Promise<void> {
     const rec = entry.rec;
     if (!rec) {
       this.#unlockPtt();
@@ -621,7 +778,12 @@ export class LessonSession {
   }
 
   /** Cat doan audio cua mot message va day len server ngay, khong doi cuoi buoi. */
-  async #cutAndUpload(entry, role) {
+  async #cutAndUpload(
+    entry: { seq: number; rec: TrackRecorder | null; startMs: number; endMs?: number | null },
+    role: Role
+  ): Promise<void> {
+    // Khong co endMs thi chua chot duoc doan — bo qua con hon cat bua.
+    if (entry.endMs == null) return;
     try {
       const blob = entry.rec?.sliceToWav(entry.startMs, entry.endMs);
       if (!blob) return;
@@ -635,14 +797,14 @@ export class LessonSession {
       );
       this.on.messageAudio(entry.seq, audioUrl, durationMs);
     } catch (err) {
-      console.warn(`[audio] khong luu duoc doan seq=${entry.seq}:`, err.message);
+      console.warn(`[audio] khong luu duoc doan seq=${entry.seq}:`, errorMessage(err));
     }
   }
 }
 
 // -------------------------------------------------------------------- utils
 
-function extractTranscript(response) {
+function extractTranscript(response: RealtimeEvent['response']): string | null {
   for (const item of response?.output ?? []) {
     for (const c of item.content ?? []) {
       if (c.transcript) return c.transcript;
@@ -651,10 +813,10 @@ function extractTranscript(response) {
   return null;
 }
 
-function extractText(response) {
+function extractText(response: RealtimeEvent['response']): string | null {
   for (const item of response?.output ?? []) {
     for (const c of item.content ?? []) {
-      if (c.type === 'output_text' || c.type === 'text') return c.text;
+      if (c.type === 'output_text' || c.type === 'text') return c.text ?? null;
     }
   }
   return null;

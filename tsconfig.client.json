@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // Khong co "types": ["node"]: code client dung nham `process` hay `Buffer`
+    // la bao loi ngay, thay vi lot vao bundle roi chet trong browser.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"]
+  },
+  "include": ["public/src/**/*.ts", "shared/**/*.ts"]
+}

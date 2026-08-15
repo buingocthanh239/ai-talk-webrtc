@@ -10,29 +10,29 @@
 const TARGET_RATE = 16000;
 
 export class TrackRecorder {
-  #ctx;
-  #source;
-  #node;
-  #samples;
+  #ctx: AudioContext;
+  #source: MediaStreamAudioSourceNode;
+  #node: AudioWorkletNode | null = null;
+  #samples: Int16Array;
   #length = 0;
-  #pending = new Float32Array(0);
+  #pending: Float32Array = new Float32Array(0);
   #cursor = 0;
-  #ratio;
+  #ratio: number;
 
-  constructor(audioContext, mediaStream) {
+  constructor(audioContext: AudioContext, mediaStream: MediaStream) {
     this.#ctx = audioContext;
     this.#source = audioContext.createMediaStreamSource(mediaStream);
     this.#ratio = audioContext.sampleRate / TARGET_RATE;
     this.#samples = new Int16Array(TARGET_RATE * 60);
   }
 
-  static async create(audioContext, mediaStream) {
+  static async create(audioContext: AudioContext, mediaStream: MediaStream): Promise<TrackRecorder> {
     const rec = new TrackRecorder(audioContext, mediaStream);
     await rec.#start();
     return rec;
   }
 
-  async #start() {
+  async #start(): Promise<void> {
     this.#node = new AudioWorkletNode(this.#ctx, 'pcm-recorder');
     this.#node.port.onmessage = (e) => this.#ingest(e.data);
     this.#source.connect(this.#node);
@@ -45,17 +45,17 @@ export class TrackRecorder {
   }
 
   /** Resample chinh xac, giu phan du giua cac chunk nen khong bi troi thoi gian. */
-  #ingest(float32) {
+  #ingest(float32: Float32Array): void {
     const merged = new Float32Array(this.#pending.length + float32.length);
     merged.set(this.#pending, 0);
     merged.set(float32, this.#pending.length);
 
     let pos = this.#cursor;
-    const out = [];
+    const out: number[] = [];
     while (Math.floor(pos) + 1 < merged.length) {
       const i0 = Math.floor(pos);
       const frac = pos - i0;
-      const s = merged[i0] * (1 - frac) + merged[i0 + 1] * frac;
+      const s = merged[i0]! * (1 - frac) + merged[i0 + 1]! * frac;
       out.push(Math.max(-1, Math.min(1, s)));
       pos += this.#ratio;
     }
@@ -66,12 +66,12 @@ export class TrackRecorder {
 
     this.#ensure(this.#length + out.length);
     for (let i = 0; i < out.length; i++) {
-      this.#samples[this.#length + i] = out[i] * 0x7fff;
+      this.#samples[this.#length + i] = out[i]! * 0x7fff;
     }
     this.#length += out.length;
   }
 
-  #ensure(needed) {
+  #ensure(needed: number): void {
     if (needed <= this.#samples.length) return;
     let size = this.#samples.length;
     while (size < needed) size *= 2;
@@ -81,21 +81,21 @@ export class TrackRecorder {
   }
 
   /** Vi tri hien tai tinh bang ms, do bang chinh so mau da ghi. */
-  nowMs() {
+  nowMs(): number {
     return (this.#length / TARGET_RATE) * 1000;
   }
 
-  #msToIndex(ms) {
+  #msToIndex(ms: number): number {
     return Math.max(0, Math.min(this.#length, Math.round((ms / 1000) * TARGET_RATE)));
   }
 
   /** RMS cua mot cua so 20ms, dung de do im lang. */
-  #rmsAt(index) {
+  #rmsAt(index: number): number {
     const win = Math.round(TARGET_RATE * 0.02);
     const end = Math.min(this.#length, index + win);
     let sum = 0;
     for (let i = index; i < end; i++) {
-      const v = this.#samples[i] / 0x7fff;
+      const v = this.#samples[i]! / 0x7fff;
       sum += v * v;
     }
     return Math.sqrt(sum / Math.max(1, end - index));
@@ -106,7 +106,7 @@ export class TrackRecorder {
    * Dung de cat duoi cau AI: `response.done` bao model sinh xong,
    * nhung audio van dang phat not qua WebRTC nen cat ngay se bi hut cuoi cau.
    */
-  lastVoiceMs(fromMs, toMs, threshold = 0.015) {
+  lastVoiceMs(fromMs: number, toMs: number, threshold = 0.015): number | null {
     const start = this.#msToIndex(fromMs);
     const end = this.#msToIndex(toMs);
     const step = Math.round(TARGET_RATE * 0.02);
@@ -117,7 +117,7 @@ export class TrackRecorder {
   }
 
   /** Moc ms dau tien co tieng noi — dung de bo khoang lang dau doan. */
-  firstVoiceMs(fromMs, toMs, threshold = 0.015) {
+  firstVoiceMs(fromMs: number, toMs: number, threshold = 0.015): number | null {
     const start = this.#msToIndex(fromMs);
     const end = this.#msToIndex(toMs);
     const step = Math.round(TARGET_RATE * 0.02);
@@ -127,19 +127,19 @@ export class TrackRecorder {
     return null;
   }
 
-  hasVoice(fromMs, toMs, threshold = 0.015) {
+  hasVoice(fromMs: number, toMs: number, threshold = 0.015): boolean {
     return this.firstVoiceMs(fromMs, toMs, threshold) !== null;
   }
 
   /** Cat mot doan thanh WAV blob. Tra null neu doan rong. */
-  sliceToWav(startMs, endMs) {
+  sliceToWav(startMs: number, endMs: number): Blob | null {
     const from = this.#msToIndex(startMs);
     const to = this.#msToIndex(endMs);
     if (to - from < TARGET_RATE * 0.15) return null; // ngan hon 150ms thi bo
     return encodeWav(this.#samples.subarray(from, to), TARGET_RATE);
   }
 
-  stop() {
+  stop(): void {
     try {
       this.#node?.port.close();
       this.#node?.disconnect();
@@ -150,12 +150,12 @@ export class TrackRecorder {
   }
 }
 
-export function encodeWav(samples, sampleRate) {
+export function encodeWav(samples: Int16Array, sampleRate: number): Blob {
   const bytes = samples.length * 2;
   const buffer = new ArrayBuffer(44 + bytes);
   const view = new DataView(buffer);
 
-  const ascii = (offset, str) => {
+  const ascii = (offset: number, str: string): void => {
     for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
   };
 

@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+
+    // Node type-stripping bat buoc import phai ghi ro duoi .ts ("./db.ts").
+    // Ghi ".js" se loi ERR_MODULE_NOT_FOUND luc chay. esbuild hieu ca hai,
+    // con tsc chi cho phep duoi .ts khi khong emit — day dung la truong hop
+    // do: tsc chi kiem kieu, esbuild moi la thu sinh ra file.
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+
+    "strict": true,
+    "noImplicitOverride": true,
+
+    // Co chu KHONG bat noUncheckedIndexedAccess. No nam ngoai `strict`, va o
+    // day gia tri no mang lai khong bu duoc phan on: moi nhom bat duoc tu
+    // regex cua router deu chac chan ton tai khi pattern da khop, nhung co
+    // flag nay thi cho nao cung phai them `!`.
+    "noFallthroughCasesInSwitch": false,
+    "exactOptionalPropertyTypes": false,
+
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}

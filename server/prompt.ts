@@ -5,7 +5,16 @@
  * nen browser khong sua duoc luat cham diem hay luat goi tool.
  */
 
-function renderObjectives(lesson, progress) {
+import type { Lesson, Message, ProgressRecord, SeedItem } from '../shared/types.ts';
+
+export interface ResumeContext {
+  summary: string;
+  recentTurns: string;
+  /** Cac item se duoc client bom lai vao conversation qua conversation.item.create */
+  seedItems: SeedItem[];
+}
+
+function renderObjectives(lesson: Lesson, progress: ProgressRecord[]): string {
   const byId = new Map(progress.map((p) => [p.objectiveId, p]));
   return lesson.objectives
     .map((o) => {
@@ -18,15 +27,21 @@ function renderObjectives(lesson, progress) {
     .join('\n');
 }
 
-function renderVocabulary(lesson) {
+function renderVocabulary(lesson: Lesson): string {
   return lesson.vocabulary.map((v) => `- ${v.term}`).join('\n');
 }
 
-function renderGrammar(lesson) {
+function renderGrammar(lesson: Lesson): string {
   return lesson.grammar.map((g) => `- ${g.point}: ${g.note}`).join('\n');
 }
 
-export function buildInstructions(lesson, { progress = [], resume = null } = {}) {
+export function buildInstructions(
+  lesson: Lesson,
+  {
+    progress = [],
+    resume = null,
+  }: { progress?: ProgressRecord[]; resume?: ResumeContext | null } = {}
+): string {
   const hintLanguageRule = lesson.allowVietnameseHint
     ? 'At hint level 3 only, you may add one short Vietnamese gloss in parentheses. Everywhere else, English only.'
     : 'English only at all times. Never speak Vietnamese, even if the learner does.';
@@ -100,11 +115,39 @@ Continue from here with a single short turn.`;
 }
 
 /**
- * Rap context de seed lai sau khi reconnect.
+ * Prompt moi cho model transcribe.
+ *
+ * Khong phai de "ra lenh" — whisper dung prompt nhu mot mau van canh de doan
+ * tu. Khong co no, doan ghi ngan (1-2 giay) lam whisper bia ra ca doan dai
+ * khong lien quan: mot file 1.3 giay tung cho ra 90 chu "Bye-bye. Bye-bye…".
+ * Co van canh thi no chiu tra ve doan ngan dung voi thuc te.
+ *
+ * Whisper chi doc khoang 224 token dau, nen giu that gon: boi canh mot cau,
+ * roi den danh sach tu vung cua bai.
+ */
+export function buildTranscriptionPrompt(lesson: Lesson): string {
+  const terms = lesson.vocabulary
+    .flatMap((v) => v.term.split('/').map((t) => t.trim()))
+    .filter(Boolean);
+
+  return truncate(
+    `An English learner practising: ${lesson.title}. ` +
+      `Expected words: ${terms.join(', ')}.`,
+    600
+  );
+}
+
+/**
+ * Rap context de seed lai sau khi noi lai ket noi.
  * Khong replay toan bo lich su: cac luot cu bi nen thanh tom tat,
  * chi giu nguyen van N luot gan nhat de mach hoi thoai lien.
  */
-export function buildResumeContext(lesson, messages, progress, keepVerbatim = 6) {
+export function buildResumeContext(
+  lesson: Lesson,
+  messages: Message[],
+  progress: ProgressRecord[],
+  keepVerbatim = 6
+): ResumeContext | null {
   if (messages.length === 0) return null;
 
   const older = messages.slice(0, Math.max(0, messages.length - keepVerbatim));
@@ -140,13 +183,12 @@ export function buildResumeContext(lesson, messages, progress, keepVerbatim = 6)
   return {
     summary: summaryParts.join('\n'),
     recentTurns: recentTurns || '(no transcribed turns yet)',
-    /** Cac item se duoc client bom lai vao conversation qua conversation.item.create */
     seedItems: recent
       .filter((m) => m.text?.trim())
       .map((m) => ({ role: m.role, text: m.text })),
   };
 }
 
-function truncate(s, n) {
+function truncate(s: string, n: number): string {
   return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
 }

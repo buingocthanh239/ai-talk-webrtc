@@ -20,6 +20,8 @@
         <p>Luyện nói tiếng Anh với AI qua WebRTC — thời gian thực, có chấm điểm và ghi âm lại.</p>
       </header>
 
+      <div id="quota-notice" class="banner hidden"></div>
+
       <section>
         <h2>Chọn bài học</h2>
         <div id="lesson-list" class="card-grid"></div>
@@ -78,6 +80,7 @@
               <div id="mic-state" class="mic-state">
                 <span class="dot"></span><span id="mic-label">Đang kết nối…</span>
               </div>
+              <span id="quota-clock" class="quota-clock hidden"></span>
               <button id="btn-hint" class="ghost-btn">💡 Gợi ý</button>
               <button id="btn-finish" class="primary-btn" disabled>Kết thúc bài học</button>
             </div>
@@ -92,6 +95,6 @@
       <div id="summary-body"></div>
     </main>
 
-    <script type="module" src="/js/main.js"></script>
+    <script type="module" src="/js/bundle.js"></script>
   </body>
 </html>

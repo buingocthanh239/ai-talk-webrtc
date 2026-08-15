@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // Khong co "DOM": code server dung nham `document` hay `window` la tsc bao
+    // loi ngay thay vi den luc chay moi vo.
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": ["server/**/*.ts", "shared/**/*.ts"]
+}

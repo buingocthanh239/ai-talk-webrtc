@@ -1,13 +1,38 @@
-import { api } from './api.js';
-import { LessonSession } from './session.js';
+import { api } from './api.ts';
+import { LessonSession } from './session.ts';
+import type { PttState, SessionHandlers } from './session.ts';
 
-const $ = (id) => document.getElementById(id);
-const el = (tag, className, text) => {
+import type {
+  Lesson,
+  Message,
+  ObjectiveProgress,
+  Quota,
+  Role,
+  SessionDetail,
+  Summary,
+} from '../../shared/types.ts';
+
+/**
+ * Thieu mot phan tu trong index.html la loi lap trinh, khong phai tinh huong
+ * can xu ly. Nga ra ngay luc nap trang de biet ngay, hon la de `null` troi den
+ * mot handler nao do roi vo giua chung.
+ */
+function $<T extends HTMLElement = HTMLElement>(id: string): T {
+  const node = document.getElementById(id);
+  if (!node) throw new Error(`Thieu phan tu #${id} trong index.html`);
+  return node as T;
+}
+
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className?: string | null,
+  text?: string
+): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
-};
+}
 
 const screens = {
   home: $('screen-home'),
@@ -15,7 +40,11 @@ const screens = {
   summary: $('screen-summary'),
 };
 
-function showScreen(name) {
+/** `catch (err)` cho ra `unknown` duoi strict — boc mot lan o day. */
+const errorMessage = (err: unknown): string =>
+  err instanceof Error ? err.message : String(err);
+
+function showScreen(name: keyof typeof screens): void {
   for (const [key, node] of Object.entries(screens)) {
     node.classList.toggle('hidden', key !== name);
   }
@@ -24,12 +53,37 @@ function showScreen(name) {
 
 // ─────────────────────────────────── home ───────────────────────────────────
 
-async function loadHome() {
+let quotaExhausted = false;
+
+function renderQuotaNotice(quota: Quota | null): void {
+  const node = $('quota-notice');
+  if (!quota) {
+    node.classList.add('hidden');
+    return;
+  }
+
+  quotaExhausted = quota.remainingMs <= 0;
+  const mins = Math.floor(quota.remainingMs / 60000);
+  const secs = Math.floor((quota.remainingMs % 60000) / 1000);
+
+  node.className = `banner ${quotaExhausted ? 'warn' : 'info'}`;
+  node.textContent = quotaExhausted
+    ? `Đã dùng hết ${Math.round(quota.totalMs / 60000)} phút miễn phí hôm nay. Hạn mức mới lúc ${new Date(
+        quota.resetAt
+      ).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })} — các buổi đang dở vẫn giữ nguyên.`
+    : `Hôm nay bạn còn ${mins}:${String(secs).padStart(2, '0')} thời lượng gọi miễn phí.`;
+}
+
+async function loadHome(): Promise<void> {
   showScreen('home');
-  const [lessons, sessions] = await Promise.all([
+  stopQuotaClock();
+  const [lessons, sessions, quota] = await Promise.all([
     api.listLessons().catch(() => []),
     api.listSessions().catch(() => []),
+    api.getQuota().catch(() => null),
   ]);
+
+  renderQuotaNotice(quota);
 
   const list = $('lesson-list');
   list.replaceChildren(
@@ -99,10 +153,10 @@ async function loadHome() {
 
 // ─────────────────────────────────── live ───────────────────────────────────
 
-let active = null;
-const bubbles = new Map();
+let active: LessonSession | null = null;
+const bubbles = new Map<number, HTMLElement>();
 
-function setBanner(text, kind) {
+function setBanner(text: string | null, kind?: 'info' | 'warn' | 'error'): void {
   const banner = $('status-banner');
   if (!text) {
     banner.classList.add('hidden');
@@ -112,7 +166,7 @@ function setBanner(text, kind) {
   banner.textContent = text;
 }
 
-function renderPanel(lesson) {
+function renderPanel(lesson: Lesson): void {
   $('live-title').textContent = lesson.title;
   $('live-meta').textContent = `${lesson.level} · ~${lesson.estimatedMinutes} phút`;
 
@@ -135,7 +189,7 @@ function renderPanel(lesson) {
   );
 }
 
-function renderObjectives(objectives) {
+function renderObjectives(objectives: ObjectiveProgress[]): void {
   $('objective-list').replaceChildren(
     ...objectives.map((o) => {
       const li = el('li', o.status);
@@ -150,7 +204,7 @@ function renderObjectives(objectives) {
   );
 }
 
-function upsertBubble({ seq, role, text, pending }) {
+function upsertBubble({ seq, role, text, pending }: { seq: number; role: Role; text: string; pending?: boolean }): void {
   let node = bubbles.get(seq);
   if (!node) {
     node = el('div', `bubble ${role}`);
@@ -160,16 +214,19 @@ function upsertBubble({ seq, role, text, pending }) {
 
     // Chen dung thu tu seq, khong phai lúc nao cung append cuoi
     const transcript = $('transcript');
-    const after = [...transcript.children].find((c) => Number(c.dataset.seq) > seq);
-    node.dataset.seq = String(seq);
+    const after = [...transcript.children].find(
+      (c) => Number((c as HTMLElement).dataset['seq']) > seq
+    );
+    node.dataset['seq'] = String(seq);
     transcript.insertBefore(node, after ?? null);
   }
-  node.querySelector('.txt').textContent = text || (pending ? '…' : '');
+  const txt = node.querySelector('.txt');
+  if (txt) txt.textContent = text || (pending ? '…' : '');
   node.classList.toggle('pending', Boolean(pending));
   $('transcript').scrollTop = $('transcript').scrollHeight;
 }
 
-function attachBubbleAudio(seq, url) {
+function attachBubbleAudio(seq: number, url: string): void {
   const node = bubbles.get(seq);
   if (!node || node.querySelector('audio')) return;
   const audio = el('audio');
@@ -178,6 +235,64 @@ function attachBubbleAudio(seq, url) {
   audio.src = url;
   node.append(audio);
 }
+
+// ──────────────────────────── đồng hồ hạn mức ────────────────────────────
+//
+// Client dem tung giay, server nan lai dinh ky qua SSE. Con so nay thuan
+// trang tri — cat that la viec cua server, nen client dem lech cung khong ai
+// goi lau duoc.
+
+// Neo lai moc do server gui, roi TINH LAI moi tick thay vi tru dan. Tab chay
+// nen bi bop setInterval xuong 1 lan/phut va may ngu thi no dung han — tru
+// dan se cham theo, con tinh tu moc neo thi tick tre bao nhieu cung dung.
+let quotaAnchor: { remainingMs: number; at: number } | null = null;
+let quotaTicker: ReturnType<typeof setInterval> | null = null;
+
+const fmtClock = (ms: number): string => {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
+
+function remainingNow(): number {
+  if (!quotaAnchor) return 0;
+  return Math.max(0, quotaAnchor.remainingMs - (performance.now() - quotaAnchor.at));
+}
+
+function paintClock(): void {
+  const left = remainingNow();
+  const node = $('quota-clock');
+  node.classList.remove('hidden');
+  node.textContent = `⏱ còn ${fmtClock(left)}`;
+  node.classList.toggle('low', left <= 60_000);
+
+  if (left <= 30_000 && left > 0 && !node.dataset['warned']) {
+    node.dataset['warned'] = '1';
+    setBanner('Sắp hết thời lượng miễn phí hôm nay — còn dưới 30 giây.', 'warn');
+  }
+}
+
+function setQuota(quota: Quota | undefined): void {
+  if (!quota || typeof quota.remainingMs !== 'number') return;
+  quotaAnchor = { remainingMs: quota.remainingMs, at: performance.now() };
+  paintClock();
+  if (quotaTicker) return;
+  quotaTicker = setInterval(paintClock, 1000);
+}
+
+function stopQuotaClock(): void {
+  if (quotaTicker) clearInterval(quotaTicker);
+  quotaTicker = null;
+  quotaAnchor = null;
+  const node = $('quota-clock');
+  node.classList.add('hidden');
+  delete node.dataset['warned'];
+}
+
+// Tab quay lai foreground thi so hien tren man co the da cu — xin nan ngay.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !quotaAnchor) return;
+  api.getQuota().then(setQuota).catch(() => {});
+});
 
 // ───────────────────────────── push-to-talk ─────────────────────────────
 
@@ -189,57 +304,58 @@ const PTT_LABEL = {
   ai: 'AI đang nói — chờ một chút',
 };
 
-function setPttUi(state) {
-  const btn = $('btn-ptt');
+function setPttUi(state: PttState): void {
+  const btn = $<HTMLButtonElement>('btn-ptt');
   btn.dataset.state = state;
   btn.disabled = state !== 'ready';
-  btn.querySelector('.ptt-icon').textContent = state === 'recording' ? '●' : '🎙';
-  btn.querySelector('.ptt-text').textContent =
-    state === 'recording' ? 'Đang thu…' : 'Giữ để nói';
+  const icon = btn.querySelector('.ptt-icon');
+  const label = btn.querySelector('.ptt-text');
+  if (icon) icon.textContent = state === 'recording' ? '●' : '🎙';
+  if (label) label.textContent = state === 'recording' ? 'Đang thu…' : 'Giữ để nói';
   $('mic-label').textContent = PTT_LABEL[state] ?? '';
 
   // Go chu va noi la hai duong vao cua cung mot luot, nen mo/khoa cung nhip.
-  $('text-input').disabled = state !== 'ready';
-  $('btn-send').disabled = state !== 'ready';
+  $<HTMLInputElement>('text-input').disabled = state !== 'ready';
+  $<HTMLButtonElement>('btn-send').disabled = state !== 'ready';
 }
 
-function sendTyped() {
-  const input = $('text-input');
+function sendTyped(): void {
+  const input = $<HTMLInputElement>('text-input');
   if (!active?.sendText(input.value)) return;
   input.value = '';
   // Tra focus ra ngoai de phim Space lai dieu khien duoc nut giu-de-noi.
   input.blur();
 }
 
-$('btn-send').onclick = sendTyped;
-$('text-input').addEventListener('keydown', (e) => {
+$<HTMLButtonElement>('btn-send').onclick = sendTyped;
+$<HTMLInputElement>('text-input').addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;
   e.preventDefault();
   sendTyped();
 });
 
-const isTyping = (node) =>
+const isTyping = (node: EventTarget | null): boolean =>
   node instanceof HTMLElement &&
   (node.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(node.tagName));
 
 let pttHeld = false;
 
-function pttDown() {
+function pttDown(): void {
   if (pttHeld || !active) return;
   if (active.startTalking()) pttHeld = true;
 }
 
-function pttUp() {
+function pttUp(): void {
   if (!pttHeld) return;
   pttHeld = false;
   active?.stopTalking();
 }
 
-$('btn-ptt').addEventListener('pointerdown', (e) => {
+$<HTMLButtonElement>('btn-ptt').addEventListener('pointerdown', (e) => {
   e.preventDefault(); // chan chon chu / long-press menu khi giu tren mobile
   pttDown();
 });
-$('btn-ptt').addEventListener('contextmenu', (e) => e.preventDefault());
+$<HTMLButtonElement>('btn-ptt').addEventListener('contextmenu', (e) => e.preventDefault());
 
 // Nghe tha tay o cap window chu khong phai tren nut: keo ngon tay ra ngoai
 // nut roi tha, hay bi cuoc goi chen ngang, ma khong bat duoc thi mic ket bat.
@@ -260,28 +376,34 @@ document.addEventListener('keyup', (e) => {
   pttUp();
 });
 
-function prepareLiveScreen(lesson) {
+function prepareLiveScreen(lesson: Lesson): void {
   bubbles.clear();
   pttHeld = false;
-  $('text-input').value = '';
+  $<HTMLInputElement>('text-input').value = '';
   setPttUi('locked');
   $('transcript').replaceChildren();
   $('hint-chips').replaceChildren();
-  $('btn-finish').disabled = true;
+  $<HTMLButtonElement>('btn-finish').disabled = true;
   setBanner(null);
   renderPanel(lesson);
-  renderObjectives(lesson.objectives.map((o) => ({ ...o, status: 'pending' })));
+  renderObjectives(lesson.objectives.map((o) => ({ ...o, status: 'pending' as const, evidence: null })));
   showScreen('live');
 }
 
-async function startLesson(lesson) {
+async function startLesson(lesson: Lesson): Promise<void> {
+  // Chan som cho do phai vao man hoc roi moi bao loi. Server van kiem lai o
+  // buoc cap token — day chi la phep lich su, khong phai cho cuong che.
+  if (quotaExhausted) {
+    renderQuotaNotice(await api.getQuota().catch(() => null));
+    return;
+  }
   prepareLiveScreen(lesson);
 
   let sessionId;
   try {
     ({ sessionId } = await api.startSession(lesson.id));
   } catch (err) {
-    setBanner(`Không tạo được buổi học: ${err.message}`, 'error');
+    setBanner(`Không tạo được buổi học: ${errorMessage(err)}`, 'error');
     return;
   }
 
@@ -289,12 +411,17 @@ async function startLesson(lesson) {
 }
 
 /** Hoc tiep mot buoi dang do: dung lai transcript cu roi noi lai ket noi. */
-async function resumeLesson(id) {
+async function resumeLesson(id: string): Promise<void> {
+  if (quotaExhausted) {
+    renderQuotaNotice(await api.getQuota().catch(() => null));
+    return;
+  }
+
   let session;
   try {
     session = await api.getSession(id);
   } catch (err) {
-    setBanner(`Không mở lại được buổi học: ${err.message}`, 'error');
+    setBanner(`Không mở lại được buổi học: ${errorMessage(err)}`, 'error');
     return;
   }
 
@@ -310,12 +437,22 @@ async function resumeLesson(id) {
   await runSession({ sessionId: id, lesson: session.lesson, startSeq: lastSeq, resume: true });
 }
 
-async function runSession({ sessionId, lesson, startSeq = 0, resume = false }) {
+async function runSession({
+  sessionId,
+  lesson,
+  startSeq = 0,
+  resume = false,
+}: {
+  sessionId: string;
+  lesson: Lesson;
+  startSeq?: number;
+  resume?: boolean;
+}): Promise<void> {
   active = new LessonSession({
     sessionId,
     lesson,
     startSeq,
-    audioElement: $('ai-audio'),
+    audioElement: $<HTMLAudioElement>('ai-audio'),
     handlers: {
       status(state, detail) {
         const label = $('mic-label');
@@ -327,20 +464,20 @@ async function runSession({ sessionId, lesson, startSeq = 0, resume = false }) {
         } else if (state === 'live') {
           // Chu o day do pttState dat ngay sau do — khong ghi de.
           // Ket thuc duoc bat cu luc nao, khong cho du muc tieu.
-          $('btn-finish').disabled = false;
-          setBanner(detail?.resumed ? 'Đã kết nối lại, hội thoại tiếp tục.' : null, 'info');
-          if (detail?.resumed) setTimeout(() => setBanner(null), 4000);
+          $<HTMLButtonElement>('btn-finish').disabled = false;
+          setBanner(detail?.['resumed'] ? 'Đã kết nối lại, hội thoại tiếp tục.' : null, 'info');
+          if (detail?.['resumed']) setTimeout(() => setBanner(null), 4000);
         } else if (state === 'reconnecting') {
           label.textContent = 'Mất kết nối';
           setBanner(
-            `Đang kết nối lại… (lần ${detail.attempt}/${detail.total}) — bài học của bạn vẫn được giữ nguyên.`,
+            `Đang kết nối lại… (lần ${detail?.['attempt']}/${detail?.['total']}) — bài học của bạn vẫn được giữ nguyên.`,
             'warn'
           );
         } else if (state === 'grading') {
           label.textContent = 'Đang chấm bài…';
         } else if (state === 'error') {
-          setBanner(detail?.message ?? 'Có lỗi xảy ra.', 'error');
-          $('btn-finish').disabled = false;
+          setBanner(String(detail?.['message'] ?? 'Có lỗi xảy ra.'), 'error');
+          $<HTMLButtonElement>('btn-finish').disabled = false;
         }
       },
 
@@ -362,7 +499,8 @@ async function runSession({ sessionId, lesson, startSeq = 0, resume = false }) {
       messageUpdate(seq, text, opts = {}) {
         const node = bubbles.get(seq);
         if (!node) return;
-        node.querySelector('.txt').textContent = text || '…';
+        const txt = node.querySelector('.txt');
+        if (txt) txt.textContent = text || '…';
         if (opts.pending === false) node.classList.remove('pending');
         $('transcript').scrollTop = $('transcript').scrollHeight;
       },
@@ -386,6 +524,18 @@ async function runSession({ sessionId, lesson, startSeq = 0, resume = false }) {
       canFinish({ note }) {
         setBanner(note || 'Bạn đã đủ điều kiện kết thúc bài học.', 'info');
       },
+
+      quota: setQuota,
+
+      quotaExhausted() {
+        stopQuotaClock();
+        setPttUi('locked');
+        setBanner(
+          'Đã hết 5 phút miễn phí hôm nay. Buổi học được giữ nguyên — mai bạn bấm “Tiếp tục” để học tiếp.',
+          'warn'
+        );
+        $<HTMLButtonElement>('btn-finish').disabled = false;
+      },
     },
   });
 
@@ -393,23 +543,23 @@ async function runSession({ sessionId, lesson, startSeq = 0, resume = false }) {
     await active.start({ resume });
   } catch (err) {
     console.error(err);
-    setBanner(`Không kết nối được: ${err.message}`, 'error');
-    $('btn-finish').disabled = false;
+    setBanner(`Không kết nối được: ${errorMessage(err)}`, 'error');
+    $<HTMLButtonElement>('btn-finish').disabled = false;
   }
 }
 
 // Bo focus sau khi bam: neu khong, phim Space sau do se vua kich lai nut nay
 // vua kich push-to-talk.
-$('btn-hint').onclick = (e) => {
-  e.currentTarget.blur();
+$<HTMLButtonElement>('btn-hint').onclick = (e) => {
+  (e.currentTarget as HTMLButtonElement | null)?.blur();
   active?.requestVoiceHint();
 };
 
-$('btn-finish').onclick = async () => {
+$<HTMLButtonElement>('btn-finish').onclick = async () => {
   if (!active) return;
   const session = active;
-  $('btn-finish').disabled = true;
-  $('btn-finish').textContent = 'Đang chấm bài…';
+  $<HTMLButtonElement>('btn-finish').disabled = true;
+  $<HTMLButtonElement>('btn-finish').textContent = 'Đang chấm bài…';
   try {
     const summary = await session.finish('manual');
     renderSummary(summary, await api.getSession(session.sessionId));
@@ -417,14 +567,14 @@ $('btn-finish').onclick = async () => {
     active = null;
   } catch (err) {
     // Giu `active` de bam lai duoc: buoi hoc da luu, chi rieng buoc cham diem hong.
-    setBanner(`Chấm bài thất bại: ${err.message} — bấm lại để thử chấm lần nữa.`, 'error');
-    $('btn-finish').disabled = false;
+    setBanner(`Chấm bài thất bại: ${errorMessage(err)} — bấm lại để thử chấm lần nữa.`, 'error');
+    $<HTMLButtonElement>('btn-finish').disabled = false;
   } finally {
-    $('btn-finish').textContent = 'Kết thúc bài học';
+    $<HTMLButtonElement>('btn-finish').textContent = 'Kết thúc bài học';
   }
 };
 
-$('btn-quit').onclick = async () => {
+$<HTMLButtonElement>('btn-quit').onclick = async () => {
   if (active && !confirm('Thoát bây giờ? Buổi học vẫn được lưu nhưng chưa có tổng kết.')) return;
   // Chi ngat ket noi, khong cham diem — thoat giua chung khong nen ton mot luot goi model.
   await active?.stop().catch(() => {});
@@ -434,16 +584,16 @@ $('btn-quit').onclick = async () => {
 
 // ────────────────────────────────── summary ─────────────────────────────────
 
-const scoreClass = (n) => (n >= 75 ? 'good' : n >= 55 ? 'warn' : 'bad');
+const scoreClass = (n: number): string => (n >= 75 ? 'good' : n >= 55 ? 'warn' : 'bad');
 
-function scoreCard(label, value, hero = false) {
+function scoreCard(label: string, value: number | null, hero = false): HTMLElement {
   const box = el('div', `score${hero ? ' hero-score' : ''}`);
-  box.append(el('div', `value ${value === null ? '' : scoreClass(value)}`, value ?? '—'));
+  box.append(el('div', `value ${value === null ? '' : scoreClass(value)}`, String(value ?? '—')));
   box.append(el('div', 'label', label));
   return box;
 }
 
-function renderSummary(summary, session) {
+function renderSummary(summary: Summary | null, session: SessionDetail): void {
   const body = $('summary-body');
   body.replaceChildren();
 
@@ -546,14 +696,16 @@ function renderSummary(summary, session) {
 }
 
 /** Nghe lai ca buoi hoc: moi message la mot file audio rieng. */
-function renderReplay(body, session) {
+function renderReplay(body: HTMLElement, session: SessionDetail): void {
   body.append(el('h2', null, 'Nghe lại buổi học'));
 
-  const withAudio = session.messages.filter((m) => m.audioUrl);
-  if (withAudio.length > 0) {
+  const urls = session.messages
+    .map((m) => m.audioUrl)
+    .filter((u): u is string => u !== null);
+  if (urls.length > 0) {
     const playAll = el('button', 'ghost-btn', '▶ Phát lại toàn bộ');
     playAll.style.marginBottom = '1rem';
-    playAll.onclick = () => playSequentially(withAudio.map((m) => m.audioUrl), playAll);
+    playAll.onclick = () => playSequentially(urls, playAll);
     body.append(playAll);
   }
 
@@ -579,9 +731,9 @@ function renderReplay(body, session) {
   }
 }
 
-let sequentialPlayer = null;
+let sequentialPlayer: HTMLAudioElement | null = null;
 
-function playSequentially(urls, button) {
+function playSequentially(urls: string[], button: HTMLElement): void {
   if (sequentialPlayer) {
     sequentialPlayer.pause();
     sequentialPlayer = null;
@@ -608,17 +760,17 @@ function playSequentially(urls, button) {
   next();
 }
 
-async function openSavedSession(id) {
+async function openSavedSession(id: string): Promise<void> {
   showScreen('summary');
   $('summary-body').replaceChildren(el('p', 'spinner', 'Đang tải…'));
   try {
     const session = await api.getSession(id);
     renderSummary(session.summary, session);
   } catch (err) {
-    $('summary-body').replaceChildren(el('p', 'empty', `Không tải được: ${err.message}`));
+    $('summary-body').replaceChildren(el('p', 'empty', `Không tải được: ${errorMessage(err)}`));
   }
 }
 
-$('btn-home').onclick = loadHome;
+$<HTMLButtonElement>('btn-home').onclick = loadHome;
 
 loadHome();

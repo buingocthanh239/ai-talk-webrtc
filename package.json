@@ -5,10 +5,17 @@
   "type": "module",
   "private": true,
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.6.0"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env server/index.js",
-    "dev": "node --watch --env-file-if-exists=.env server/index.js"
+    "build": "node build.js",
+    "check": "tsc -p tsconfig.server.json && tsc -p tsconfig.client.json",
+    "start": "npm run build && node --env-file-if-exists=.env server/index.ts",
+    "dev": "node build.js --watch & node --watch --env-file-if-exists=.env server/index.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
   }
 }

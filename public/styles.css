@@ -381,6 +381,23 @@ button {
   content: '💡 ';
 }
 
+.quota-clock {
+  margin-left: auto;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.quota-clock.low {
+  color: var(--warn);
+  font-weight: 600;
+}
+/* Nut Ket thuc dang dung margin-left:auto de day sang phai; co dong ho roi
+   thi de dong ho giu vai tro do. */
+.controls .quota-clock ~ .primary-btn {
+  margin-left: 0;
+}
+
 /* ── go chu: duong vao thu hai cua mot luot noi ── */
 
 .compose {
