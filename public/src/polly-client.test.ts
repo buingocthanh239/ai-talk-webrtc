@@ -4,8 +4,12 @@
  * Chay duoc trong Node vi polly-client chi dung Web API co san o day:
  * crypto.subtle, fetch, Blob, URL.createObjectURL. Khong can trinh duyet.
  *
- * Trong tam: mot khuc MAT AUDIO khi nao. Audio la thu nguoi hoc nghe; speech
- * marks chi de avatar nhep. Hai thu do khong duoc chet cung nhau.
+ * Trong tam: mot khuc MAT AUDIO khi nao.
+ *
+ * Bo test nay tung co mot nua noi ve speech marks — request thu hai cua moi
+ * khuc — va ve chuyen mot ben hong khong duoc keo ben kia chet theo. Duong marks
+ * da bo (avatar nhep fake tu bien do audio), nen gio moi khuc chi con MOT
+ * request va cau hoi don gian han: no ve hay khong ve.
  */
 
 import { test } from 'node:test';
@@ -25,20 +29,14 @@ const GRANT: PollyGrant = {
 
 const OPTS = { voiceId: 'Joanna', engine: 'neural' as const };
 
-/** Mot dong speech mark hop le cho viseme. */
-const MARKS = '{"time":0,"type":"viseme","value":"p"}\n{"time":80,"type":"viseme","value":"a"}';
-
 type Reply = { status: number; body: string };
-type Route = (isMarks: boolean, attempt: number) => Reply;
+type Route = (attempt: number) => Reply;
 
 interface Stub {
   restore: () => void;
   calls: () => number;
-  /**
-   * Signal truyen vao `synthesize`. Huy o `finally` de request mo coi khong
-   * chay lan sang test sau — mot ben hong KHONG huy ben kia, do la hanh vi
-   * that cua Promise.all va cung la mot phan cua bug nay.
-   */
+  /** Signal truyen vao `synthesize`. Huy o `finally` de request mo coi cua test
+   * nay khong chay lan sang test sau. */
   signal: AbortSignal;
 }
 
@@ -47,20 +45,13 @@ function stubFetch(route: Route): Stub {
   const original = globalThis.fetch;
   const abort = new AbortController();
   let calls = 0;
-  const perKind = new Map<boolean, number>();
 
   globalThis.fetch = (async (_url: string, init: RequestInit) => {
     // `fetch` that tu choi ngay khi signal da huy. Khong mo phong cho nay thi
     // request mo coi cua test truoc van dem vao so lan goi cua test sau.
     if (init.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-    calls++;
-    const payload = JSON.parse(String(init.body)) as { OutputFormat: string };
-    const isMarks = payload.OutputFormat === 'json';
-    const attempt = perKind.get(isMarks) ?? 0;
-    perKind.set(isMarks, attempt + 1);
-
-    const { status, body } = route(isMarks, attempt);
+    const { status, body } = route(calls++);
     return new Response(body, { status });
   }) as typeof globalThis.fetch;
 
@@ -74,39 +65,43 @@ function stubFetch(route: Route): Stub {
   };
 }
 
-test('ca hai request OK: co audio va co khau hinh', async () => {
-  const stub = stubFetch((isMarks) => ({ status: 200, body: isMarks ? MARKS : 'MP3BYTES' }));
+test('mot khuc = MOT request Polly, va tra ve mp3', async () => {
+  // Truoc day la hai: mp3 va speech marks tra ve THAY CHO nhau nen khong gop
+  // duoc. Con mot nghia la moi ky tu chi bi tinh tien mot lan, va khuc dau tien
+  // cua moi luot bot duoc mot vong mang — Polly chi cho mot stream h2 mot luc
+  // nen hai request cua cung mot khuc phai noi tiep.
+  const stub = stubFetch(() => ({ status: 200, body: 'MP3BYTES' }));
   try {
     const r = await synthesize(GRANT, 'Hello there.', { ...OPTS, signal: stub.signal });
     assert.ok(r.url.length > 0);
     assert.equal(await r.blob.text(), 'MP3BYTES');
-    assert.equal(r.frames.length, 2);
+    assert.equal(stub.calls(), 1, 'khong duoc goi Polly them lan nao nua');
   } finally {
     stub.restore();
   }
 });
 
-test('speech marks hong nhung audio OK: VAN phai co audio', async () => {
-  // Day la loi that: `Promise.all` buoc hai request song lam chet lam. Polly
-  // tinh TPS theo ca account va moi khuc ban HAI request, nen request marks bi
-  // throttle la chuyen binh thuong — va khi do khuc do mat tieng hoan toan,
-  // du file mp3 da tai ve thanh cong.
-  const stub = stubFetch((isMarks) =>
-    isMarks ? { status: 429, body: 'Rate exceeded' } : { status: 200, body: 'MP3BYTES' }
-  );
+test('khong xin speech marks nua', async () => {
+  // Mot request `OutputFormat: "json"` lot lai vao day la hoa don am tham nhan
+  // doi: AWS tinh tien speech marks Y HET synthesize.
+  const formats: unknown[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+    const payload = JSON.parse(String(init.body)) as Record<string, unknown>;
+    formats.push(payload['OutputFormat'], payload['SpeechMarkTypes']);
+    return new Response('MP3BYTES', { status: 200 });
+  }) as typeof globalThis.fetch;
+
   try {
-    const r = await synthesize(GRANT, 'Hello there.', { ...OPTS, signal: stub.signal });
-    assert.equal(await r.blob.text(), 'MP3BYTES', 'audio phai con nguyen');
-    assert.deepEqual(r.frames, [], 'khong co khau hinh thi thoi, avatar dung im');
+    await synthesize(GRANT, 'Hello there.', OPTS);
+    assert.deepEqual(formats, ['mp3', undefined]);
   } finally {
-    stub.restore();
+    globalThis.fetch = original;
   }
 });
 
 test('audio hong thi nem — khuc do that su khong doc duoc', async () => {
-  const stub = stubFetch((isMarks) =>
-    isMarks ? { status: 200, body: MARKS } : { status: 400, body: 'ValidationException' }
-  );
+  const stub = stubFetch(() => ({ status: 400, body: 'ValidationException' }));
   try {
     await assert.rejects(
       () => synthesize(GRANT, 'Hello there.', { ...OPTS, signal: stub.signal }),
@@ -125,14 +120,13 @@ test('loi TANG MANG (socket bi dong) phai duoc thu lai', async () => {
   // polly-client.ts. Con lai la mang that: doi Wi-Fi, may vua ngu day, socket
   // dut giua chung. Chrome KHONG tu thu lai POST (chi thu lai cac method
   // idempotent) nen phai tu lam o day.
-  const stub = stubFetch((isMarks, attempt) => {
+  const stub = stubFetch((attempt) => {
     if (attempt === 0) throw new TypeError('Failed to fetch');
-    return { status: 200, body: isMarks ? MARKS : 'MP3BYTES' };
+    return { status: 200, body: 'MP3BYTES' };
   });
   try {
     const r = await synthesize(GRANT, 'Hello there.', { ...OPTS, signal: stub.signal });
     assert.equal(await r.blob.text(), 'MP3BYTES');
-    assert.equal(r.frames.length, 2);
   } finally {
     stub.restore();
   }
@@ -163,19 +157,19 @@ test('khong bao gio co hai request Polly chong nhau', async () => {
   let live = 0;
   let peak = 0;
 
-  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+  globalThis.fetch = (async () => {
     live++;
     peak = Math.max(peak, live);
     // Co do tre thi cho chong nhau moi lo ra; tra ve ngay thi test luon xanh.
     await new Promise((r) => setTimeout(r, 10));
     live--;
-    const payload = JSON.parse(String(init.body)) as { OutputFormat: string };
-    return new Response(payload.OutputFormat === 'json' ? MARKS : 'MP3BYTES', { status: 200 });
+    return new Response('MP3BYTES', { status: 200 });
   }) as typeof globalThis.fetch;
 
   try {
-    // Ba khuc cung luc — dung tran MAX_IN_FLIGHT cua SpeechQueue, va moi khuc
-    // la hai request (audio + speech marks). Tong cong sau.
+    // Ba khuc cung luc — dung tran MAX_IN_FLIGHT cua SpeechQueue. Bo speech
+    // marks lam so request tut tu sau xuong ba, nhung rang buoc thi khong doi:
+    // mot stream mot luc, ba khuc van phai xep hang.
     await Promise.all([
       synthesize(GRANT, 'One.', OPTS),
       synthesize(GRANT, 'Two.', OPTS),
@@ -188,15 +182,14 @@ test('khong bao gio co hai request Polly chong nhau', async () => {
 });
 
 test('429 roi thanh cong: co retry, khong bo khuc', async () => {
-  const stub = stubFetch((isMarks, attempt) => {
+  const stub = stubFetch((attempt) => {
     if (attempt === 0) return { status: 429, body: 'Rate exceeded' };
-    return { status: 200, body: isMarks ? MARKS : 'MP3BYTES' };
+    return { status: 200, body: 'MP3BYTES' };
   });
   try {
     const r = await synthesize(GRANT, 'Hello there.', { ...OPTS, signal: stub.signal });
     assert.equal(await r.blob.text(), 'MP3BYTES');
-    assert.equal(r.frames.length, 2);
-    assert.equal(stub.calls(), 4, 'moi ben mot lan hong + mot lan lai');
+    assert.equal(stub.calls(), 2, 'mot lan hong + mot lan lai');
   } finally {
     stub.restore();
   }

@@ -14,7 +14,6 @@
  *   hoac tunnel.
  */
 
-import { parseSpeechMarks, type VisemeFrame } from "../../shared/viseme.ts";
 import type { PollyGrant, PollyEngine } from "../../shared/types.ts";
 
 const ALGORITHM = "AWS4-HMAC-SHA256";
@@ -245,7 +244,6 @@ export interface SynthesisResult {
   /** Blob URL cua mp3. Ben goi phai `URL.revokeObjectURL` khi xong. */
   url: string;
   blob: Blob;
-  frames: VisemeFrame[];
 }
 
 export interface SynthesizeOptions {
@@ -255,30 +253,25 @@ export interface SynthesizeOptions {
 }
 
 /**
- * Doc mot khuc va lay ve ca audio lan timeline khau hinh.
+ * Doc mot khuc thanh mp3.
  *
- * HAI request vi speech marks tra ve THAY CHO audio chu khong kem theo — day
- * la thiet ke cua Polly, khong gop duoc.
+ * MOT REQUEST MOT KHUC — va cho nay tung la hai.
  *
- * Hai request do di NOI TIEP chu khong song song, va khong phai vi ta muon the:
- * Polly chi cho mot stream h2 mot luc (xem `serial` o tren). Nen mot khuc ton
- * hai vong mang chu khong phai mot. Doi lai, khuc N+1 van duoc tong hop trong
- * luc khuc N dang PHAT, ma phat mot cau thi lau hon nhieu so voi mot vong
- * mang — nen chi khuc dau tien cua moi luot that su cham them.
+ * Truoc day moi khuc con ban them mot request `SpeechMarkTypes: ["viseme"]` de
+ * lay timeline khau hinh, vi speech marks cua Polly tra ve THAY CHO audio chu
+ * khong kem theo. Duong do da bo: avatar gio nhep fake tu bien do audio ngay
+ * tren may (`fake-mouth.ts`), khong hoi Polly nua.
  *
- * HAI REQUEST DO KHONG NGANG HANG NHAU, va cho nay tung lam nhu the.
+ * Bo di duoc hai thu, va thu thu hai moi la thu dang gia:
  *
- * Truoc day chung di bang `Promise.all`, nen mot ben hong la mat ca hai. Ma
- * moi khuc ban hai request trong khi Polly tinh TPS theo CA ACCOUNT, nen 429 la
- * chuyen thuong ngay — va cu roi vao ben marks thi khuc do mat tieng hoan toan,
- * du file mp3 da ve toi noi. Nghe ra dung la "AI bo mat vai doan".
+ *   - Tien: AWS tinh tien speech marks Y HET synthesize, nen moi ky tu AI noi
+ *     truoc day bi tinh HAI lan.
+ *   - Do tre: Polly chi cho MOT stream h2 mot luc (xem `serial` o tren), nen hai
+ *     request cua cung mot khuc phai di noi tiep. Khuc dau tien cua moi luot la
+ *     toan bo do tre nguoi hoc cam thay, va no vua mat mot vong mang.
  *
- * Thu tu uu tien that: audio la thu nguoi hoc NGHE, speech marks chi de avatar
- * nhep mom. Mat khau hinh thi avatar dung im mot khuc; mat audio thi mat han
- * mot doan bai hoc. Nen marks duoc phep hong.
- *
- * Cung nguyen tac ma khau cham diem dung `Promise.allSettled` cho summary va
- * cham phat am — hong mot phan khong duoc keo do phan kia.
+ * Cai da mat: khau hinh dung am vi. Xem dau `fake-mouth.ts` de biet vi sao
+ * doi duoc, va khi nao thi phai doi nguoc lai.
  */
 export async function synthesize(
   grant: PollyGrant,
@@ -298,31 +291,19 @@ export async function synthesize(
     ? AbortSignal.any([opts.signal, timeout])
     : timeout;
 
-  const common = { Text: text, VoiceId: opts.voiceId, Engine: opts.engine };
-
-  // Goi audio TRUOC: `serial` xep hang theo dung thu tu goi, va audio la thu
-  // nguoi hoc nghe — no khong duoc xep sau khau hinh.
-  const audioReq = callPolly(grant, { ...common, OutputFormat: "mp3" }, signal);
-
-  // Bat loi NGAY luc tao: neu de den sau `await audioReq` thi mot khuc marks
-  // hong trong luc audio con dang tai se thanh unhandled rejection.
-  const marksText = callPolly(
+  const bytes = await callPolly(
     grant,
-    { ...common, OutputFormat: "json", SpeechMarkTypes: ["viseme"] },
+    {
+      Text: text,
+      VoiceId: opts.voiceId,
+      Engine: opts.engine,
+      OutputFormat: "mp3",
+    },
     signal,
-  ).then(
-    (bytes) => new TextDecoder().decode(bytes),
-    () => null,
   );
 
-  const blob = new Blob([await audioReq], { type: "audio/mpeg" });
-  const marks = await marksText;
-
-  return {
-    url: URL.createObjectURL(blob),
-    blob,
-    frames: marks === null ? [] : parseSpeechMarks(marks),
-  };
+  const blob = new Blob([bytes], { type: "audio/mpeg" });
+  return { url: URL.createObjectURL(blob), blob };
 }
 
 /** Con han it hon nguong nay thi coi nhu sap chet, xin cai moi truoc. */

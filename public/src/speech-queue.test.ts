@@ -5,8 +5,8 @@
  * Cau hoi duy nhat o day: MOI khuc co duoc phat, va co duoc phat HET khong.
  *
  * Vung nay truoc gio khong co test nao, va da co hai loi lot qua: `emptied`
- * cua chinh minh bi hieu la "phat xong", va `Promise.all` lam marks hong keo
- * theo audio.
+ * cua chinh minh bi hieu la "phat xong", va `Promise.all` lam speech marks hong
+ * keo theo audio. Loi thu hai gio khong the tai dien — duong marks da bo han.
  */
 
 import { test } from 'node:test';
@@ -23,8 +23,6 @@ const GRANT: PollyGrant = {
   voiceId: 'Joanna',
   engine: 'neural',
 };
-
-const MARKS = '{"time":0,"type":"viseme","value":"p"}\n{"time":90,"type":"viseme","value":"a"}';
 
 /**
  * <audio> gia. Mo phong hai diem cua spec co that:
@@ -98,20 +96,21 @@ interface Env {
   restore: () => void;
   /** Text goc cua khuc dang nam sau mot blob URL. */
   textOf: (url: string) => Promise<string>;
+  /** So request Polly da di. Mot khuc phai la dung mot. */
+  calls: () => number;
 }
 
-function stubEnv(marksStatus = 200): Env {
+function stubEnv(): Env {
   const origFetch = globalThis.fetch;
   const origCreate = URL.createObjectURL;
   const origRevoke = URL.revokeObjectURL;
   const blobs = new Map<string, Blob>();
   let n = 0;
+  let calls = 0;
 
   globalThis.fetch = (async (_url: string, init: RequestInit) => {
-    const payload = JSON.parse(String(init.body)) as { OutputFormat: string; Text: string };
-    if (payload.OutputFormat === 'json') {
-      return new Response(marksStatus === 200 ? MARKS : 'Rate exceeded', { status: marksStatus });
-    }
+    calls++;
+    const payload = JSON.parse(String(init.body)) as { Text: string };
     // Than mp3 gia chinh la text — nho vay lan nguoc tu blob ve khuc duoc.
     return new Response(payload.Text, { status: 200 });
   }) as typeof globalThis.fetch;
@@ -130,6 +129,7 @@ function stubEnv(marksStatus = 200): Env {
       URL.revokeObjectURL = origRevoke;
     },
     textOf: async (url) => (await blobs.get(url)?.text()) ?? '',
+    calls: () => calls,
   };
 }
 
@@ -138,25 +138,25 @@ interface Run {
   played: string[];
   cutOff: string[];
   errors: string[];
-  chunks: number;
+  /** Do dai bao ra cho khau luu audio, theo tung khuc. */
+  durations: number[];
+  calls: number;
 }
 
 /** Nap text vao hang doi, doi `onDrain`, tra ve nhung gi da xay ra. */
-async function run(text: string, marksStatus = 200): Promise<Run> {
-  const env = stubEnv(marksStatus);
+async function run(text: string): Promise<Run> {
+  const env = stubEnv();
   const audio = new FakeAudio();
   const errors: string[] = [];
-  let chunks = 0;
+  const durations: number[] = [];
 
   try {
     const drained = new Promise<void>((resolve) => {
       const queue = new SpeechQueue(audio as unknown as HTMLAudioElement, {
-        onChunk: () => {
-          chunks++;
-        },
         onDrain: () => resolve(),
         onError: (m) => errors.push(m),
         refreshGrant: async () => GRANT,
+        onAudio: (_blob, _text, durationMs) => durations.push(durationMs),
       });
       queue.setGrant(GRANT);
       queue.push(text);
@@ -171,7 +171,7 @@ async function run(text: string, marksStatus = 200): Promise<Run> {
     ]);
     const played = [];
     for (const url of audio.played) played.push(await env.textOf(url));
-    return { played, cutOff: audio.cutOff, errors, chunks };
+    return { played, cutOff: audio.cutOff, errors, durations, calls: env.calls() };
   } finally {
     env.restore();
   }
@@ -187,7 +187,6 @@ test('moi khuc deu duoc phat HET, khong khuc nao bi cat ngang', async () => {
   assert.ok(r.played.length >= 3, `phai co nhieu khuc, co ${r.played.length}`);
   assert.deepEqual(r.cutOff, [], 'khong khuc nao duoc phep bi ghi de src khi chua xong');
   assert.deepEqual(r.errors, []);
-  assert.equal(r.chunks, r.played.length, 'so khuc nap timeline phai khop so khuc phat');
 });
 
 test('khuc phat dung thu tu va khong sot chu', async () => {
@@ -199,9 +198,23 @@ test('khuc phat dung thu tu va khong sot chu', async () => {
   assert.equal(norm(spoken), norm(TEXT));
 });
 
-test('speech marks hong: van doc du moi khuc, chi mat khau hinh', async () => {
-  const r = await run(TEXT, 429);
+test('ca luot chi ton dung mot request Polly moi khuc', async () => {
+  // Cai gia thuc cua khau nhep mom nam o day chu khong o hoa don thang: moi
+  // request thua la mot vong mang nua tren duong noi tiep (Polly chi cho mot
+  // stream h2 mot luc), va khuc dau tien cua moi luot chinh la toan bo do tre
+  // nguoi hoc cam thay.
+  const r = await run(TEXT);
+  assert.equal(r.calls, r.played.length, 'mot khuc phai la dung mot request');
+});
 
-  assert.ok(r.played.length >= 3, 'marks hong khong duoc lam mat khuc nao');
-  assert.deepEqual(r.cutOff, []);
+test('moi khuc bao ra mot do dai uoc luong duong', async () => {
+  // Con so nay tung doc tu moc viseme cuoi cua speech marks. Bo marks thi no
+  // uoc tu do dai chu — sai vai tram ms thi khong sao, nhung ve 0 la man tong
+  // ket hien "0:00" cho moi cau AI.
+  const r = await run(TEXT);
+
+  assert.equal(r.durations.length, r.played.length, 'khuc nao doc xong cung phai bao');
+  for (const ms of r.durations) {
+    assert.ok(ms > 0 && Number.isFinite(ms), `do dai vo nghia: ${ms}`);
+  }
 });

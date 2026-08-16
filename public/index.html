@@ -65,18 +65,22 @@
         <aside class="side">
           <button id="btn-quit" class="link-btn">← Thoát</button>
 
-          <!-- Avatar nhep mom theo viseme cua Polly. An cho toi khi bat tay
-               xong: chua co ket noi thi chua biet co cau hinh avatar khong. -->
+          <!-- Avatar map may mom theo biên độ audio (nhép FAKE — xem
+               public/src/fake-mouth.ts). Ẩn cho tới khi bắt tay xong: chưa có
+               kết nối thì chưa biết có cấu hình avatar không.
+
+               KHÔNG có dòng gợi ý tiếng Việt ở đây nữa. Khẩu hình bây giờ đoán
+               từ độ to, nên dán nhãn "đầu lưỡi chạm lợi sau răng trên" lên nó
+               là dạy sai thật chứ không còn là nhìn cho vui. -->
           <div id="talk-avatar" class="talk-avatar hidden">
             <canvas id="talk-canvas" class="talk-canvas"></canvas>
-            <p id="talk-hint" class="viseme-hint"></p>
             <p id="talk-avatar-note" class="meta"></p>
 
-            <!-- Thanh đo luôn chạy kể cả khi không có AVATAR_URL. Khi mồm
-                 avatar đứng im, đây là cách duy nhất phân biệt "dữ liệu không
-                 chạy" với "model thiếu morph target". -->
+            <!-- Thanh đo luôn chạy kể cả khi nhân vật chưa có asset. Khi mồm
+                 avatar đứng im, đây là cách duy nhất phân biệt "không có tín
+                 hiệu audio" với "rig không nhận". -->
             <details class="viseme-debug">
-              <summary>22 thanh đo viseme</summary>
+              <summary>thanh đo khẩu hình</summary>
               <div id="talk-bars" class="viseme-bars"></div>
             </details>
           </div>

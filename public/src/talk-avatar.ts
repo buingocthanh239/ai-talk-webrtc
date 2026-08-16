@@ -1,36 +1,29 @@
 /**
- * Avatar nhep mom TRONG hoi thoai, kem 22 thanh do viseme de soi loi.
+ * Avatar map may mom TRONG hoi thoai, kem vai thanh do de soi loi.
  *
- * Truoc day day la viec bat kha thi: audio cua AI ve bang media track cua
- * Realtime API, khong kem viseme, khong kem phoneme, khong kem timestamp — chi
- * con cach suy tu pho am thanh, ma cach do dung NHIP nhung sai AM VI.
- *
- * Gio AI tra ve chu, tieng noi do Polly doc, va Polly tra thang timeline viseme
- * kem moc ms. Khong con gi phai doan.
+ * NHEP O DAY LA FAKE. Khau hinh suy tu bien do audio, khong tu am vi — dung
+ * nhip, sai am vi. Xem dau `fake-mouth.ts` de biet vi sao doi va khi nao phai
+ * doi nguoc lai.
  *
  * Ba tang chong len nhau, moi tang kiem chung duoc rieng:
- *   Polly              -> timeline viseme dung am vi
- *   VisemePlayer       -> khau hinh dang mo + bang trong so, theo audio.currentTime
- *   Avatar (Spine)     -> phat animation viseme_N
+ *   FakeMouthPlayer  -> bien do the <audio> -> khau hinh + do mo
+ *   Avatar (Spine)   -> phat animation viseme_N tren track 1
+ *   thanh do         -> nhin thay du lieu co chay khong khi mom dung im
  *
  * **Thanh do luon ve, ke ca khi khong cau hinh avatar.** Khi mom avatar dung
  * im, do la cach duy nhat phan biet "du lieu khong chay" voi "rig khong nhan".
- * Nam thanh do bi lam mo la nam khau hinh Polly khong bao gio goi toi duoc —
- * de khong ai mat buoi chieu di tim xem vi sao chung dung im.
+ *
+ * Chi ve thanh do cho nhung khau hinh fake THAT SU dung toi, cong mot thanh do
+ * mo. Truoc day o day ve du 22 thanh vi Polly cham toi 17 trong so do; gio chi
+ * con nam hinh song, ma 17 thanh dung im vinh vien thi dung la cai bay ma hang
+ * so `UNREACHABLE_BY_POLLY` ngay xua duoc sinh ra de tranh.
  */
 
 import { Avatar, type AvatarBundle } from './avatar.ts';
-import { VisemePlayer, type VisemeWeights } from './viseme-player.ts';
-import {
-  UNREACHABLE_BY_POLLY,
-  VISEME_HINT_VI,
-  VISEME_IDS,
-  type VisemeFrame,
-} from '../../shared/viseme.ts';
+import { FakeMouthPlayer, FAKE_VISEME_IDS, type MouthFrame } from './fake-mouth.ts';
+import type { VisemeId } from '../../shared/viseme.ts';
 
 export interface TalkAvatar {
-  /** Sang khuc moi: nap timeline cua khuc do. */
-  load(frames: readonly VisemeFrame[]): void;
   dispose(): void;
 }
 
@@ -38,53 +31,56 @@ export interface TalkAvatarOptions {
   canvas: HTMLCanvasElement;
   /** Cho bao ba truong hop hong khac nhau — xem bang trong docs/lip-sync.md. */
   note: HTMLElement;
-  /** Chua 22 thanh do. */
+  /** Chua cac thanh do. */
   bars: HTMLElement;
-  /** Mot dong tieng Viet mo ta khau hinh dang mo. */
-  hint: HTMLElement;
   /** Chinh la the <audio> ma SpeechQueue dang phat. */
   audio: HTMLAudioElement;
   /** null = nhan vat chua co asset Spine. */
   bundle: AvatarBundle | null;
 }
 
+/** Nhan cua thanh do mo — no khong phai mot viseme ID nen khong nam trong bo kia. */
+const LEVEL_LABEL = 'mở';
+
 export async function createTalkAvatar({
   canvas,
   note,
   bars,
-  hint,
   audio,
   bundle,
 }: TalkAvatarOptions): Promise<TalkAvatar> {
-  const unreachable = new Set(UNREACHABLE_BY_POLLY);
-  const barFills = new Map<number, HTMLElement>();
+  const fills = new Map<VisemeId | typeof LEVEL_LABEL, HTMLElement>();
+
+  const makeBar = (key: VisemeId | typeof LEVEL_LABEL, label: string): HTMLElement => {
+    const row = document.createElement('div');
+    row.className = 'viseme-bar';
+
+    const name = document.createElement('span');
+    name.className = 'viseme-name';
+    name.textContent = label;
+
+    const track = document.createElement('div');
+    track.className = 'viseme-track';
+    const fill = document.createElement('i');
+    track.append(fill);
+    fills.set(key, fill);
+
+    row.append(name, track);
+    return row;
+  };
 
   bars.replaceChildren(
-    ...VISEME_IDS.map((id) => {
-      const row = document.createElement('div');
-      row.className = unreachable.has(id) ? 'viseme-bar unreachable' : 'viseme-bar';
-      if (unreachable.has(id)) row.title = 'Polly không tạo được khẩu hình này';
-
-      const label = document.createElement('span');
-      label.className = 'viseme-name';
-      label.textContent = String(id);
-
-      const track = document.createElement('div');
-      track.className = 'viseme-track';
-      const fill = document.createElement('i');
-      track.append(fill);
-      barFills.set(id, fill);
-
-      row.append(label, track);
-      return row;
-    })
+    // Do mo di truoc: khi mom dung im, day la thanh phan biet "khong co tin
+    // hieu audio nao" voi "co tin hieu ma rig khong nhan".
+    makeBar(LEVEL_LABEL, LEVEL_LABEL),
+    ...FAKE_VISEME_IDS.map((id) => makeBar(id, String(id)))
   );
 
   const avatar = new Avatar(canvas);
   let loaded = false;
 
   if (!bundle) {
-    note.textContent = 'Nhân vật này chưa có avatar — chỉ hiện thanh đo viseme.';
+    note.textContent = 'Nhân vật này chưa có avatar — chỉ hiện thanh đo.';
   } else {
     try {
       await avatar.load(bundle);
@@ -98,33 +94,32 @@ export async function createTalkAvatar({
     }
   }
 
-  function paintBars(weights: VisemeWeights): void {
-    for (const id of VISEME_IDS) {
-      const fill = barFills.get(id);
-      if (fill) fill.style.transform = `scaleX(${(weights[id] ?? 0).toFixed(3)})`;
-    }
-  }
+  const paint = (frame: MouthFrame): void => {
+    const level = fills.get(LEVEL_LABEL);
+    if (level) level.style.transform = `scaleX(${frame.level.toFixed(3)})`;
 
-  const player = new VisemePlayer(audio, {
-    onViseme: (id, weight) => {
+    for (const id of FAKE_VISEME_IDS) {
+      const fill = fills.get(id);
+      // Khau hinh la roi rac: chi mot cai dang mo, va no cao bang chinh alpha
+      // dang day vao Spine. Nho vay nhin thanh do la biet Spine dang nhan gi.
+      if (fill) {
+        fill.style.transform = `scaleX(${(id === frame.id ? frame.weight : 0).toFixed(3)})`;
+      }
+    }
+  };
+
+  const player = new FakeMouthPlayer(audio, {
+    onMouth: (frame) => {
       // Rig chua tai duoc thi bo qua, thanh do van chay — do la ca diem cua
       // viec tach hai nhanh nay.
-      if (loaded) avatar.playViseme(id, weight);
-
-      // Dong chu doc tu day — tuc la tu TIMELINE, khong tu bang trong so da
-      // lam muot. Giua hai khau hinh trong so bi chia doi nen khong cai nao
-      // vuot nguong, va dong chu se nhay ve "mieng nghi" mot cai dung luc
-      // nguoi hoc dang doc no.
-      const text = VISEME_HINT_VI[id] ?? '';
-      if (hint.textContent !== text) hint.textContent = text;
+      if (loaded) avatar.playViseme(frame.id, frame.weight);
+      paint(frame);
     },
-    onWeights: paintBars,
   });
 
   player.start();
 
   return {
-    load: (frames) => player.load(frames),
     dispose: () => {
       player.stop();
       avatar.dispose();

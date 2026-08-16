@@ -1,6 +1,10 @@
 /**
  * Bien dong text cua AI thanh tieng noi: cat khuc -> Polly -> phat theo dung
- * thu tu -> day timeline viseme ra ngoai cho avatar.
+ * thu tu.
+ *
+ * Hang doi nay khong con biet gi ve khau hinh. Avatar tu doc bien do cua chinh
+ * the <audio> duoi day (`fake-mouth.ts`), nen khong ai phai chuyen timeline qua
+ * day nua.
  *
  * Diem quan trong nhat: khuc N+1 duoc tong hop TRONG LUC khuc N dang phat. Nho
  * vay chi khuc dau tien la nguoi dung that su phai doi; tu khuc thu hai tro di
@@ -10,7 +14,11 @@
  * Ban dau thiet ke la cap `<audio>` luan phien de preload khuc ke. Nhung Polly
  * tra ve ca file mp3 mot luc va ta giu no lam Blob trong RAM — khong con gi de
  * "tai truoc" ca. Cai duy nhat con lai la ham nong bo giai ma, vai chuc ms,
- * khong dang de doi lay viec `VisemePlayer` phai bam theo hai element.
+ * khong dang de doi lay viec avatar phai bam theo hai element.
+ *
+ * Rang buoc do gio CUNG hon nhieu: `createMediaElementSource` chi goi duoc MOT
+ * lan cho moi the <audio>, vinh vien. Quay lai thiet ke hai the la duong nhep
+ * mom chet han — xem `FakeMouthPlayer`.
  */
 
 import { SentenceChunker } from '../../shared/chunk.ts';
@@ -18,7 +26,6 @@ import { waitForPlayback, type PlaybackWait } from '../../shared/playback.ts';
 import { grantUsable, PollyError, synthesize } from './polly-client.ts';
 import type { SynthesisResult } from './polly-client.ts';
 import type { PollyEngine, PollyGrant } from '../../shared/types.ts';
-import type { VisemeFrame } from '../../shared/viseme.ts';
 
 /** Toi da bao nhieu khuc duoc tong hop cung luc. */
 const MAX_IN_FLIGHT = 3;
@@ -33,8 +40,6 @@ const MAX_IN_FLIGHT = 3;
 const TURN_FAILSAFE_MS = 30_000;
 
 export interface SpeechQueueHandlers {
-  /** Bat dau phat mot khuc: nap timeline cho avatar. */
-  onChunk: (frames: VisemeFrame[]) => void;
   /** Het sach hang doi va dong text da dong — luot cua AI ket thuc. */
   onDrain: () => void;
   /** Mot khuc hong. Text da hien roi nen day chi de ghi log. */
@@ -47,18 +52,31 @@ export interface SpeechQueueHandlers {
   /**
    * Mot khuc mp3 da doc xong. Dung khi nguoi hoc bat luu audio cua AI.
    *
-   * `durationMs` la UOC LUONG tu moc viseme cuoi: Polly khong tra do dai audio,
-   * va giai ma mp3 chi de biet con so nay thi khong dang. No chi dung de hien
-   * do dai o man tong ket.
+   * `durationMs` la UOC LUONG — xem `estimateDuration`.
    */
   onAudio?: (blob: Blob, text: string, durationMs: number) => void;
 }
 
-/** Duoi cau con ngan sau moc viseme cuoi cung — cong them mot chut cho gan. */
-const TAIL_MS = 120;
+/**
+ * Toc do doc cua Polly neural, ky tu/giay. Cung con so ma `docs/cost.md` muc 4
+ * dung de quy doi tien (~165 wpm).
+ */
+const CHARS_PER_SEC = 14;
 
-const estimateDuration = (frames: readonly VisemeFrame[]): number =>
-  frames.length ? (frames[frames.length - 1]?.tMs ?? 0) + TAIL_MS : 0;
+/**
+ * Uoc do dai mot khuc tu DO DAI CHU.
+ *
+ * Truoc day con so nay doc tu moc viseme cuoi cung cua speech marks, tuc la gan
+ * dung. Bo speech marks thi mat luon cai moc do, va khong con nguon nao re: giai
+ * ma mp3 chi de biet do dai la qua dat, con `audio.duration` thi chi co sau khi
+ * gan `src` — muon dung no phai doi `onAudio` xuong sau luc phat, ma nhu vay
+ * khuc bi huy giua chung se khong duoc luu lai nua.
+ *
+ * Nen day la uoc luong thuan, va no chi chay vao MOT cho: dong thoi luong hien
+ * canh cau AI o man tong ket. Uoc sai vai tram ms khong ai thay.
+ */
+const estimateDuration = (text: string): number =>
+  Math.round((text.length / CHARS_PER_SEC) * 1000);
 
 interface Job {
   text: string;
@@ -286,7 +304,7 @@ export class SpeechQueue {
         this.#jobs.shift();
 
         if (!result) continue;
-        this.#on.onAudio?.(result.blob, job.text, estimateDuration(result.frames));
+        this.#on.onAudio?.(result.blob, job.text, estimateDuration(job.text));
 
         try {
           await this.#playOne(result);
@@ -314,7 +332,6 @@ export class SpeechQueue {
     audio.src = result.url;
     audio.preservesPitch = true;
     audio.playbackRate = this.#rate;
-    this.#on.onChunk(result.frames);
 
     // Chi nghe `ended`/`error`. Duong huy khong muon su kien nao lam tin ma
     // duoc `cancel()` goi thang — xem `shared/playback.ts` de biet vi sao

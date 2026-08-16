@@ -487,7 +487,6 @@ async function mountTalkAvatar(bundle: AvatarBundle | null): Promise<void> {
       canvas: $<HTMLCanvasElement>('talk-canvas'),
       note: $('talk-avatar-note'),
       bars: $('talk-bars'),
-      hint: $('talk-hint'),
       audio: $<HTMLAudioElement>('ai-audio'),
       bundle,
     });
@@ -716,12 +715,6 @@ async function runSession({
       },
 
       quota: setQuota,
-
-      // Timeline cua khuc AI vua bat dau doc. Day la thu duong audio cu khong
-      // bao gio cho duoc — Realtime API khong phat ra viseme nao.
-      visemes(frames) {
-        talkAvatar?.load(frames);
-      },
 
       character(character) {
         renderCharacterBadge(character);
@@ -954,8 +947,7 @@ function renderReplay(body: HTMLElement, session: SessionDetail): void {
       row.append(audio);
     } else if (m.role === 'assistant' && m.text && session.pollyGrant) {
       // Khong bat luu mp3 thi khong co file nao ca — doc lai bang Polly ngay
-      // luc bam. Ton them tien moi lan nghe, doi lai buoi hoc khong phai luu
-      // gi, va ban doc lai nay co du viseme neu sau nay muon xem khau hinh.
+      // luc bam. Ton them tien moi lan nghe, doi lai buoi hoc khong phai luu gi.
       row.append(speakAgainButton(m.text, session.pollyGrant, session.character));
     } else {
       row.append(el('div', 'no-audio', 'không có audio'));

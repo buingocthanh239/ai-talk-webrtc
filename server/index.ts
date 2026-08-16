@@ -337,10 +337,19 @@ async function mintClientSecret({
       type: 'realtime',
       model,
       instructions: buildInstructions(lesson, { progress, resume, character }),
-      // AI chi tra ve CHU. Tieng noi do client tu lay tu Amazon Polly, vi
-      // Realtime API khong phat ra viseme/phoneme nao — nhep mom trong hoi
-      // thoai chi con cach suy tu pho am thanh, dung nhip nhung sai am vi.
-      // Doi lai: mat prosody cua giong Realtime, va them mot vong goi Polly.
+      // AI chi tra ve CHU. Tieng noi do client tu lay tu Amazon Polly.
+      //
+      // Ly do ban dau la khau hinh: Realtime API khong phat ra viseme/phoneme
+      // nao, con Polly tra thang speech marks. Ly do do da het — avatar gio
+      // nhep fake tu bien do audio (`public/src/fake-mouth.ts`) va khong can
+      // Polly noi gi ve am vi ca.
+      //
+      // Nhung quyet dinh thi khong doi, vi ly do CON LAI moi la ly do lon:
+      // TIEN. Cho OpenAI phat audio truc tiep lam tong hoa don gap ~2,1 lan —
+      // audio out dat gap ~2,9 lan Polly, va giong AI sinh ra con nam lai
+      // trong context de bi doc lai o moi luot sau. Xem `docs/cost.md` muc 6.
+      //
+      // Cai gia: mat prosody cua giong Realtime, va them mot vong goi Polly.
       // Push-to-talk nen khong mat gi ve ngat loi — khong co barge-in de mat.
       output_modalities: ['text'],
       audio: {

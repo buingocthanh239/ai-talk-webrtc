@@ -17,7 +17,6 @@ import type {
   SeedItem,
   UploadGrant,
 } from '../../shared/types.ts';
-import type { VisemeFrame } from '../../shared/viseme.ts';
 import { clampSpeed } from '../../shared/speed.ts';
 
 /** Trang thai nut push-to-talk. Chi 'ready' moi cho bat dau noi. */
@@ -50,11 +49,6 @@ export interface SessionHandlers {
   pttState?: (state: PttState) => void;
   quota?: (quota: Quota) => void;
   quotaExhausted?: () => void;
-  /**
-   * Timeline khau hinh cua khuc AI vua bat dau phat. Nap thang vao
-   * `VisemePlayer` — day la thu ma duong audio cu khong bao gio cho duoc.
-   */
-  visemes?: (frames: VisemeFrame[]) => void;
   /** Nhan vat cua buoi hoc. Goi mot lan khi bat tay xong. */
   character?: (character: Character) => void;
 }
@@ -211,7 +205,6 @@ export class LessonSession {
     this.#speed = clampSpeed(speed ?? lesson.speed);
 
     this.#speech = new SpeechQueue(audioElement, {
-      onChunk: (frames) => this.on.visemes?.(frames),
       onDrain: () => this.#onSpeechDone(),
       onError: (message) => console.warn('[tts]', message),
       refreshGrant: () => this.#refreshPollyGrant(),
@@ -995,9 +988,8 @@ export class LessonSession {
   /**
    * Gom mp3 cua tung khuc lai. Chi chay khi nguoi hoc bat luu audio cua AI.
    *
-   * `durationMs` la uoc luong tu moc viseme cuoi cung — Polly khong tra do dai
-   * audio, va giai ma mp3 chi de biet con so nay thi khong dang. No chi dung
-   * de hien do dai o man tong ket.
+   * `durationMs` la uoc luong tu do dai chu — xem `estimateDuration` trong
+   * `speech-queue.ts`. No chi dung de hien do dai o man tong ket.
    */
   #collectTurnAudio(blob: Blob, durationMs: number): void {
     if (!this.#turnAudio) return;

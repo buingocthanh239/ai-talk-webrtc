@@ -1054,15 +1054,6 @@ button {
   transform-origin: left center;
 }
 
-/* Gợi ý tiếng Việt về vị trí lưỡi/môi — bù cho việc rig không có lưỡi. */
-.viseme-hint {
-  min-height: 2.6em;
-  margin: 0.5rem 0 0;
-  color: var(--accent);
-  font-size: 0.9rem;
-  line-height: 1.35;
-}
-
 /* Thanh đo là công cụ soi lỗi, không phải thứ nhìn suốt buổi — gập sẵn. */
 .viseme-debug {
   margin-top: 0.6rem;
@@ -1192,8 +1183,3 @@ button {
   line-height: 1.35;
 }
 
-/* Năm khẩu hình Polly không bao giờ gọi tới — làm mờ để không ai mất buổi
-   chiều đi tìm xem vì sao chúng đứng im. */
-.viseme-bar.unreachable {
-  opacity: 0.35;
-}
