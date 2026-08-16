@@ -290,12 +290,17 @@ avatar thì không bao giờ tải nó về.
 | `REALTIME_MODEL` | `gpt-realtime` | model hội thoại |
 | `GRADER_TEXT_MODEL` | `gpt-4o` | chấm grammar/vocab/mục tiêu |
 | `GRADER_AUDIO_MODEL` | `gpt-4o-audio-preview` | để trống = tắt chấm phát âm |
+| `PORT` | `3000` | |
+| `DAILY_QUOTA_MS` | `300000` | thời lượng gọi miễn phí mỗi thiết bị mỗi ngày (5 phút) |
+| `QUOTA_TZ_OFFSET_MS` | `25200000` | mốc reset hạn mức, lệch so với UTC (GMT+7) |
 | `AUDIO_STORE` | `disk` | `s3` = client đẩy thẳng lên bucket |
 | `S3_REGION` / `S3_BUCKET` | — | bắt buộc khi `AUDIO_STORE=s3` |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | nt |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | nt. Dùng chung cho S3, Polly và STS |
+| `AWS_SESSION_TOKEN` | — | chỉ khi chạy bằng credential tạm (IAM role trên EC2/ECS) |
 | `S3_ENDPOINT` | — | chỉ khi dev với MinIO; có giá trị = dùng path-style URL |
 | `CDN_DOMAIN` | — | để trống thì phát lại bằng presigned GET |
-| `CF_KEY_PAIR_ID` / `CF_PRIVATE_KEY_PATH` | — | bắt buộc khi có `CDN_DOMAIN` |
+| `CF_KEY_PAIR_ID` | — | bắt buộc khi có `CDN_DOMAIN` |
+| `CF_PRIVATE_KEY` / `CF_PRIVATE_KEY_PATH` | — | đặt **một** trong hai; `CF_PRIVATE_KEY` được ưu tiên |
 | `POLLY` | `off` | `on` = bật Polly (màn luyện khẩu hình **và** tiếng nói của AI trong hội thoại) |
 | `POLLY_REGION` | theo `S3_REGION` | bucket và Polly không bắt buộc cùng vùng |
 | `POLLY_VOICE` | `Joanna` | đổi giọng = đổi cache key, sinh lại toàn bộ |
