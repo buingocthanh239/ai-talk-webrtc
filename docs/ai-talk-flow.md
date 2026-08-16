@@ -7,6 +7,15 @@ Các diagram bám sát code hiện tại (`public/src/session.ts`, `public/src/r
 `server/index.ts`, `server/grader.ts`). Chỗ nào mobile phải làm khác web đều được ghi chú
 bằng `Note over` hoặc nêu ở phần [Khác biệt web ↔ mobile](#khác-biệt-web--mobile).
 
+> **Tiếng nói của AI KHÔNG đến từ OpenAI.** Session chạy `output_modalities: ["text"]` — OpenAI chỉ
+> nghe audio và trả về chữ. Client tự gom chữ thành từng khúc, tự ký và gọi thẳng Amazon Polly để
+> lấy mp3 kèm viseme timeline, rồi tự phát. Nhờ vậy avatar nhép đúng âm vị ngay trong hội thoại,
+> thứ mà đường audio cũ không bao giờ cho được: xem [`lip-sync.md`](lip-sync.md) mục 0.
+>
+> Hệ quả trong tài liệu này: không còn media track chiều về, không còn `TrackRecorder` cho AI,
+> không còn vòng dò im lặng để đoán lúc AI nói xong. Chỉ đoạn ghi của **người học** mới được lưu
+> mặc định — nghe lại câu AI thì đọc lại bằng Polly.
+
 ---
 
 ## 0. Các nhân vật
@@ -15,7 +24,9 @@ bằng `Note over` hoặc nêu ở phần [Khác biệt web ↔ mobile](#khác-b
 |---|---|---|---|
 | **App** | UI + điều phối buổi học | `main.ts` + `LessonSession` | ViewModel / Bloc + `LessonSession` port sang Swift/Kotlin |
 | **RTC** | Transport WebRTC thuần | `RealtimeConnection` (browser RTCPeerConnection) | libwebrtc (`WebRTC.framework` / `org.webrtc`) |
-| **Rec** | Ghi PCM liên tục + cắt WAV | 2× `AudioWorklet` | `AVAudioEngine` tap / `JavaAudioDeviceModule.SamplesReadyCallback` |
+| **Rec** | Ghi PCM liên tục + cắt WAV — **chỉ micro** | 1× `AudioWorklet` | `AVAudioEngine` tap |
+| **TTS** | Cắt câu → Polly → phát → viseme | `SpeechQueue` + `polly-client.ts` | port cùng logic; ký SigV4 bằng CryptoKit / javax.crypto |
+| **P** | Amazon Polly | client gọi thẳng | như nhau |
 | **BE** | Backend Node | `server/index.ts` | như nhau |
 | **DB** | SQLite + chỗ để WAV (đĩa hoặc S3, xem [mục 11](#11-lưu-trữ-audio-client-tự-đẩy-thẳng-lên-s3)) | như nhau | như nhau |
 | **OAI** | OpenAI Realtime API (WebRTC) | như nhau | như nhau |
@@ -23,10 +34,11 @@ bằng `Note over` hoặc nêu ở phần [Khác biệt web ↔ mobile](#khác-b
 
 Điểm quan trọng về kiến trúc, đúng cho cả hai nền tảng:
 
-> **Media đi thẳng client ↔ OpenAI. Backend không nằm trên đường audio.**
-> Với `AUDIO_STORE=s3` thì cả đường lưu trữ cũng vậy: client `POST` file thẳng lên bucket, backend
-> chỉ nhận metadata. Backend giữ: mint ephemeral token, cấp quyền ghi, lưu transcript, đếm hạn mức,
-> cắt cuộc gọi, chấm điểm.
+> **Media đi thẳng client ↔ nhà cung cấp. Backend không nằm trên đường audio.**
+> Đúng cho cả ba chặng: audio lên OpenAI qua WebRTC, tiếng nói lấy từ Polly (client tự ký bằng
+> credential tạm), và với `AUDIO_STORE=s3` thì client `POST` file thẳng lên bucket. Backend giữ:
+> mint ephemeral token, cấp quyền ghi và quyền gọi Polly, lưu transcript, đếm hạn mức, cắt cuộc
+> gọi, chấm điểm.
 > Trạng thái bài học nằm ở server; WebRTC chỉ là đường truyền — mất kết nối chỉ mất đường truyền.
 
 ---
@@ -40,6 +52,7 @@ sequenceDiagram
     participant App as Mobile/Web App
     participant BE as Backend
     participant OAI as OpenAI Realtime
+    participant P as Amazon Polly
     participant DB as SQLite + WAV
 
     U->>App: Chọn bài học
@@ -58,9 +71,10 @@ sequenceDiagram
     loop Mỗi lượt nói (mục 3)
         U->>App: Giữ nút 🎤 … thả
         App->>OAI: audio + commit + response.create
-        OAI-->>App: transcript + audio AI
+        OAI-->>App: transcript + text của AI (KHÔNG có audio)
+        App->>P: cắt khúc → đọc → phát + viseme
         App->>BE: lưu message
-        App->>DB: WAV → S3 (hoặc đĩa), xem mục 11
+        App->>DB: WAV của người học → S3 (hoặc đĩa), xem mục 11
     end
 
     rect rgb(255, 245, 235)
@@ -90,6 +104,7 @@ sequenceDiagram
     participant RTC as WebRTC layer
     participant BE as Backend
     participant OAI as OpenAI
+    participant STS as AWS STS
 
     U->>App: Bấm "Bắt đầu"
 
@@ -100,11 +115,15 @@ sequenceDiagram
     App->>BE: POST /api/sessions/:id/token {resume:false}
     Note over BE: Layer 1 chặn hạn mức:<br/>quotaFor(userId).remainingMs <= 0<br/>→ 429 {code:"quota_exhausted"}
     BE->>BE: buildInstructions(lesson, progress)
-    BE->>OAI: POST /v1/realtime/client_secrets<br/>{instructions, tools, whisper-1,<br/> turn_detection:null, voice, speed}
-    Note over BE: speed = lesson.speed (0.25–1.5).<br/>Người học đè lên bằng session.update<br/>giữa các lượt — API không cho đổi<br/>giữa chừng một câu đang nói.
+    BE->>OAI: POST /v1/realtime/client_secrets<br/>{instructions, tools, whisper-1,<br/> turn_detection:null, output_modalities:["text"]}
+    Note over BE: KHÔNG còn voice/speed: session chỉ trả chữ.<br/>Giọng là POLLY_VOICE, tốc độ là playbackRate<br/>của thẻ &lt;audio&gt; — đổi được cả giữa chừng một câu.
     OAI-->>BE: {value, expires_at}
-    BE-->>App: {clientSecret, model, seedItems[], progress[], uploadGrant}
+
+    BE->>STS: AssumeRole {RoleArn, DurationSeconds:3600,<br/> Policy: polly:SynthesizeSpeech<br/> + aws:SourceIp + DateLessThan}
+    STS-->>BE: credential tạm
+    BE-->>App: {clientSecret, model, seedItems[], progress[],<br/> uploadGrant, pollyGrant, avatarUrl}
     Note over BE,App: uploadGrant = presigned POST policy cho CẢ buổi:<br/>starts-with $key → audio/&lt;sessionId&gt;/, 45..5MB, hạn 2h.<br/>Cấp lại mỗi lần xin token nên reconnect luôn có bản còn hạn.<br/>null = server đang lưu audio trên đĩa.
+    Note over BE,App: pollyGrant = credential AWS tạm, KÝ MỘT LẦN cho cả buổi.<br/>Ràng vào IP của client và có hạn cứng, vì nó nằm trong browser.<br/>Đổi Wi-Fi ↔ 4G là 403 → xin lại qua POST /sessions/:id/polly.
 
     Note over App,OAI: API key thật không bao giờ rời server.<br/>App chỉ cầm secret ngắn hạn, không sửa được luật bài học.
 
@@ -116,10 +135,7 @@ sequenceDiagram
     RTC->>RTC: callId = Location.split("/").pop()
     RTC->>RTC: setRemoteDescription(answer) → chờ DataChannel "open"
 
-    OAI-->>RTC: ontrack (audio AI)
-    RTC-->>App: onRemoteStream
-    App->>Rec: TrackRecorder.create(remote track)
-    Note over App: MOBILE: không có <audio srcObject>.<br/>libwebrtc tự phát ra loa qua AudioDeviceModule.<br/>Ghi track AI: RTCAudioRenderer (iOS) /<br/>AudioTrackSink (Android), không phải WebAudio.
+    Note over RTC,OAI: KHÔNG có ontrack: session trả text nên OpenAI<br/>không gửi audio về. Thẻ &lt;audio&gt; giờ thuộc về<br/>SpeechQueue để phát mp3 của Polly.
 
     App->>RTC: setMicEnabled(false)
     Note over App,RTC: Push-to-talk: track vẫn nằm trong SDP,<br/>chỉ mute → không phải renegotiate.
@@ -147,6 +163,7 @@ sequenceDiagram
     participant Rec as Recorder
     participant RTC
     participant OAI as OpenAI
+    participant P as Amazon Polly
     participant BE as Backend
     participant S3 as S3 bucket
 
@@ -189,26 +206,45 @@ sequenceDiagram
             OAI-->>App: response.created
             App->>App: seq++, mở bubble assistant, state = ai
             loop streaming
-                OAI-->>App: response.output_audio_transcript.delta
+                OAI-->>App: response.output_text.delta
                 App-->>U: chữ chạy dần
+                App->>App: chunker.push(delta)
             end
-            OAI-)App: audio AI (media track) → loa
-            OAI-->>App: response.done
+            OAI-->>App: response.done → chunker.flush()
             App->>BE: POST /messages {seq, role:"assistant", text}
 
-            Note over App,Rec: response.done ≠ hết tiếng.<br/>Audio còn đang phát nốt qua WebRTC.
-            loop mỗi 300ms, tối đa 12s
-                App->>Rec: lastVoiceMs()
-            end
-            App->>App: im lặng > 700ms → chốt endMs
-            App-->>U: state = ready (mở lại nút)
-            App->>Rec: sliceToWav()
-            App->>S3: POST → BE: xác nhận key (như nhánh trên)
+            Note over App,P: response.done chỉ nghĩa là hết CHỮ.<br/>Tiếng nói thì mới bắt đầu.
         end
 
         App->>OAI: response.create {conversation:"none"} — xin gợi ý chip (mục 5)
     end
+
+    Note over App,P: Đọc — bắt đầu ngay từ khúc đầu tiên,<br/>chạy đè lên vòng streaming ở trên
+    loop mỗi khúc
+        App->>P: 2 request SONG SONG, tự ký SigV4<br/>(mp3 và speech marks)
+        P-->>App: mp3 bytes / JSON phân cách bằng dòng
+        App->>App: parseSpeechMarks → VisemeFrame[]
+        App-->>U: phát khúc, avatar nhép theo audio.currentTime
+        Note right of App: Khúc N+1 đã đọc xong trong lúc khúc N phát,<br/>nên chỉ khúc ĐẦU là người học phải đợi.
+    end
+
+    App->>App: hàng đợi cạn → state = ready (mở lại nút)
 ```
+
+**Luật cắt khúc bất đối xứng** (`shared/chunk.ts`). Toàn bộ độ trễ người học cảm thấy nằm ở khúc
+đầu tiên, nên hai nhóm ngưỡng khác hẳn nhau:
+
+| | Ngưỡng |
+|---|---|
+| Khúc đầu | Dấu kết câu, hoặc `,;:—`, hoặc ranh giới từ khi quá 40 ký tự — cái nào tới trước. Tối thiểu 15 ký tự |
+| Khúc sau | Gom tới hết câu và ≥ 60 ký tự. Trần cứng 200 thì cắt ở dấu mềm gần nhất |
+| `response.done` | Flush phần còn lại bất kể dài ngắn |
+
+Không được cắt nhầm ở `Mr.` `e.g.` `U.S.` hay số thập phân (`3.14`) — Polly đọc một mảnh câu bằng
+ngữ điệu xuống giọng của câu hoàn chỉnh, nghe ra ngay.
+
+**Một khúc hỏng không làm hỏng cả lượt:** bỏ khúc đó, hàng đợi chạy tiếp. Chữ đã hiện rồi nên người
+học không mất nội dung.
 
 **Vì sao không dùng `MediaRecorder.start()/stop()` theo từng lượt (và trên mobile là
 `AVAudioRecorder` / `MediaRecorder`):** recorder khởi động chậm hơn tiếng nói ~100–200ms nên luôn
@@ -363,7 +399,12 @@ sequenceDiagram
 ```
 
 > **Audio của message cũ không nạp lại được vào session realtime mới — chỉ nạp text.**
-> Không sao: audio cũ vẫn nằm nguyên trong DB để phát lại ở màn tổng kết.
+> Không sao: đoạn ghi của người học vẫn nằm nguyên trong DB, còn câu của AI thì đọc lại được từ
+> text bất cứ lúc nào.
+
+Reconnect cũng là dịp cấp lại `pollyGrant`, nên credential hết hạn giữa buổi tự lành theo. Mất
+kết nối thì `SpeechQueue.cancel()` chạy: đọc nốt nửa câu của một kết nối đã chết chỉ làm người học
+rối trí.
 
 ---
 
@@ -390,7 +431,8 @@ sequenceDiagram
         BE->>DB: endCall(reason:"client") — trừ giờ ngay, không đợi hết ân hạn
         App->>App: await Promise.allSettled(pendingUploads)<br/>race với timeout 5s
         Note right of App: Trước là sleep(400ms) — một con số đoán.<br/>Đường S3 có hai chặng (POST bucket rồi confirm)<br/>cộng retry nên không đoán nổi nữa; đợi đúng<br/>hàng đợi, kèm trần cứng để mạng chết không<br/>treo màn tổng kết.
-        App->>App: stop recorders, stop mic tracks, close AudioContext
+        App->>App: SpeechQueue.cancel() — huỷ fetch Polly đang chạy,<br/>dừng audio, revokeObjectURL các khúc chưa phát
+        App->>App: stop recorder, stop mic tracks, close AudioContext
         Note over App: MOBILE: deactivate AVAudioSession /<br/>abandonAudioFocus, nếu không thì<br/>nhạc nền của app khác không quay lại được
     end
 
@@ -414,6 +456,10 @@ sequenceDiagram
     U->>App: Bấm vào một lỗi
     App->>BE: GET /audio/:sessionId/:seq-user.wav
     Note right of App: Mỗi lỗi gắn message_seq → nghe lại đúng câu đó
+
+    opt Nghe lại câu của AI
+        Note over App,GA: Mặc định KHÔNG lưu audio của AI.<br/>Bấm "🔊 Đọc lại" thì client gọi Polly<br/>đọc lại từ text trong DB — kèm cả viseme.<br/>Bật công tắc "Lưu giọng AI" thì mp3 được<br/>đẩy lên S3 như đoạn của người học.
+    end
 ```
 
 ---
@@ -569,8 +615,16 @@ sequenceDiagram
 
 | Lớp | Ở đâu | Chặn gì |
 |---|---|---|
-| Policy | S3 kiểm | Ghi ra ngoài `audio/<sessionId>/`, file < 45B hoặc > 5MB, sai `Content-Type` |
+| Policy | S3 kiểm | Ghi ra ngoài `audio/<sessionId>/`, file < 45B hoặc > 5MB, `Content-Type` không bắt đầu bằng `audio/` |
 | `verifyKey` | `audio-store.ts` | Gán file vào nhầm `seq` / `role` trong chính session của mình |
+
+**Đuôi file theo vai, không phải theo lựa chọn:** `<seq>-user.wav` là đoạn cắt từ ring buffer PCM,
+`<seq>-assistant.mp3` là file Polly trả về nguyên xi. Giải mã rồi mã hoá lại thành WAV chỉ để đồng
+đuôi thì vừa tốn CPU vừa làm file to lên nhiều lần. Vì vậy policy ký `starts-with $Content-Type`
+là `audio/` chứ không đối chiếu tuyệt đối — một chữ ký vẫn phải phủ cả hai định dạng.
+
+Đường `assistant` **mặc định tắt**: không bật công tắc "Lưu giọng AI" thì không có file nào của AI
+cả, và màn tổng kết đọc lại bằng Polly.
 
 **Chuyện phải chấp nhận:** server không gọi `HeadObject` để kiểm tra object có thật hay không —
 thêm một round-trip cho mỗi message chỉ để biết trước điều mà grader tự xử lý được. Đổi lại, một
@@ -590,8 +644,10 @@ Backend **không cần đổi gì** ngoài hai chỗ được đánh dấu ⚠�
 | Định danh thiết bị | ⚠️ Cookie `did` (httpOnly) | Cookie không tự nhiên trên native → gửi `Authorization: Bearer <token>` hoặc `X-Device-Id` lấy từ Keychain/Keystore. Backend đọc header trước, fallback cookie |
 | Kết nối WebRTC | `RTCPeerConnection` của browser | libwebrtc: `RTCPeerConnection` (iOS ObjC/Swift), `PeerConnection` (Android). API gần như 1-1 |
 | Data channel | `dc.send(JSON)` | như nhau — `RTCDataChannel.sendData(RTCDataBuffer)` |
-| Phát audio AI | `<audio srcObject>` | libwebrtc tự phát qua AudioDeviceModule; chỉ cần cấu hình AVAudioSession / AudioManager |
-| Ghi PCM để cắt WAV | 2× `AudioWorklet` (mic + remote) | iOS: `AVAudioEngine.inputNode` tap + `RTCAudioRenderer` cho remote track. Android: `JavaAudioDeviceModule.setSamplesReadyCallback` + `AudioTrackSink`. Cùng ý tưởng: ring buffer PCM 16kHz, cắt bằng timestamp |
+| Phát audio AI | `<audio src=blob:>` (mp3 từ Polly) | `AVAudioPlayer` / `ExoPlayer` trên chính file mp3. Không còn dính đến libwebrtc |
+| Ký SigV4 gọi Polly | WebCrypto (`crypto.subtle`) | CryptoKit `HMAC<SHA256>` / `javax.crypto.Mac`. Cùng thuật toán, đồng bộ nên còn gọn hơn |
+| Đổi tốc độ đọc | `audio.playbackRate` + `preservesPitch` | iOS: `AVAudioUnitTimePitch` (đổi rate, giữ pitch). Android: `PlaybackParams.setSpeed` |
+| Ghi PCM để cắt WAV | 1× `AudioWorklet` (chỉ mic) | iOS: `AVAudioEngine.inputNode` tap. Android: `JavaAudioDeviceModule.setSamplesReadyCallback`. Cùng ý tưởng: ring buffer PCM 16kHz, cắt bằng timestamp. **Không còn nhánh remote** |
 | Echo cancellation | `getUserMedia {echoCancellation:true}` | Bật AEC cấp OS: `.voiceChat` mode (iOS) / `JavaAudioDeviceModule` builtin AEC+NS (Android). Quan trọng hơn web vì loa ngoài |
 | Kênh presence | `EventSource` (tự retry) | Không có `EventSource` native → SSE thủ công (`URLSession.bytes` / OkHttp streaming) **và tự viết vòng retry**, hoặc đổi sang WebSocket. ⚠️ Nếu đổi WS thì backend thêm route |
 | Upload WAV | `FormData` + `fetch` thẳng lên S3 | `URLSession.uploadTask(fromFile:)` / OkHttp `MultipartBody`, cũng thẳng lên S3. Nên dùng background upload task để đóng app giữa chừng vẫn đẩy nốt — grant sống 2h nên kịp |
@@ -607,6 +663,11 @@ Backend **không cần đổi gì** ngoài hai chỗ được đánh dấu ⚠�
 2. **Static file `/audio/...`** (đường `disk`) vẫn phục vụ không kiểm tra chủ sở hữu. Web thì URL
    khó đoán, nhưng khi mobile phát audio qua player riêng nên chốt luôn: kiểm tra session thuộc về
    `deviceId` của request. Đường `s3` thì không còn vấn đề này — chữ ký ràng theo đúng một session.
+3. **`aws:SourceIp` khi có reverse proxy.** `clientIp()` đọc `X-Forwarded-For` trước rồi mới tới
+   `socket.remoteAddress`. Nếu triển khai sau một proxy **không** đặt header đó thì mọi thiết bị
+   dùng chung một IP nội bộ — code tự bỏ qua các dải private/loopback, nhưng nếu proxy đưa ra một
+   IP public duy nhất thì việc ràng buộc mất tác dụng mà không báo gì. Lúc đó đặt
+   `POLLY_STS_BIND_IP=off` cho rõ ràng, hơn là để một lớp bảo vệ chỉ tồn tại trên giấy.
 
 ### Có thể dùng lại nguyên xi
 

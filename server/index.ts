@@ -6,8 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-import type { Lesson, ProgressRecord, Quota } from '../shared/types.ts';
-import { clampSpeed } from '../shared/speed.ts';
+import type { Lesson, PollyGrant, ProgressRecord, Quota } from '../shared/types.ts';
 
 import * as db from './db.ts';
 import { AUDIO_DIR } from './db.ts';
@@ -16,6 +15,10 @@ import { buildInstructions, buildResumeContext, buildTranscriptionPrompt } from 
 import type { ResumeContext } from './prompt.ts';
 import { buildTools } from './tools.ts';
 import { gradeSession } from './grader.ts';
+import { pollyConfigFromEnv } from './polly.ts';
+import { pollyGrant as mintPollyGrant, stsConfigFromEnv } from './sts.ts';
+import { buildDrill } from './drill.ts';
+import type { DrillItem, DrillResponse } from '../shared/viseme.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC_DIR = join(ROOT, 'public');
@@ -48,9 +51,70 @@ const MIME: Record<string, string> = {
   '.js': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.wav': 'audio/wav',
+  '.mp3': 'audio/mpeg',
+  '.glb': 'model/gltf-binary',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
 };
+
+/**
+ * Polly cho che do luyen khau hinh. null = chua bat, client se an tab do di.
+ * Nga ra ngay luc khoi dong neu cau hinh sai, giong cach s3.ts lam.
+ */
+const polly = pollyConfigFromEnv();
+
+/**
+ * STS de cap credential tam cho client tu goi Polly trong hoi thoai.
+ * null = chua cau hinh; AI se hien chu nhung khong co tieng.
+ */
+const sts = stsConfigFromEnv();
+
+if (polly && !sts) {
+  console.warn(
+    '  [polly] POLLY=on nhung chua co POLLY_STS_ROLE_ARN — AI se khong noi duoc trong hoi thoai\n' +
+      '          (man luyen khau hinh van chay vi no goi Polly o phia server).'
+  );
+}
+
+/** File .glb cua avatar. Khong co thi client chi ve thanh do viseme. */
+const AVATAR_URL = process.env.AVATAR_URL || null;
+
+/**
+ * IP that cua client, de rang credential Polly vao no.
+ *
+ * `x-forwarded-for` co the la mot chuoi qua nhieu proxy — phan tu DAU la client
+ * that. Chi tin duoc khi dung sau reverse proxy minh kiem soat; neu khong thi
+ * bat ky ai cung tu khai duoc IP, va het duong rang buoc.
+ */
+function clientIp(req: IncomingMessage): string | null {
+  const forwarded = req.headers['x-forwarded-for'];
+  const first = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  if (first) return first.split(',')[0]?.trim() ?? null;
+  return req.socket.remoteAddress ?? null;
+}
+
+/**
+ * Quyen goi Polly cho mot thiet bi. null khi chua cau hinh, hoac khi STS tu
+ * choi — hong duong nay khong duoc lam hong ca buoi hoc, AI van hien chu.
+ */
+async function pollyGrantFor(req: IncomingMessage, userId: string): Promise<PollyGrant | null> {
+  if (!polly || !sts) return null;
+  try {
+    return await mintPollyGrant(polly, sts, {
+      sessionName: userId,
+      sourceIp: clientIp(req),
+    });
+  } catch (err) {
+    console.warn('[polly] khong cap duoc credential tam:', errorMessage(err));
+    return null;
+  }
+}
+
+/**
+ * Drill da dung cho tung bai. Giu ca Promise chu khong chi ket qua, de hai
+ * request den cung luc luc chua co cache khong cung goi Polly hai lan.
+ */
+const drillCache = new Map<string, Promise<DrillItem[]>>();
 
 // -------------------------------------------------------------- danh tinh
 //
@@ -206,6 +270,12 @@ async function mintClientSecret({
       type: 'realtime',
       model,
       instructions: buildInstructions(lesson, { progress, resume }),
+      // AI chi tra ve CHU. Tieng noi do client tu lay tu Amazon Polly, vi
+      // Realtime API khong phat ra viseme/phoneme nao — nhep mom trong hoi
+      // thoai chi con cach suy tu pho am thanh, dung nhip nhung sai am vi.
+      // Doi lai: mat prosody cua giong Realtime, va them mot vong goi Polly.
+      // Push-to-talk nen khong mat gi ve ngat loi — khong co barge-in de mat.
+      output_modalities: ['text'],
       audio: {
         input: {
           // whisper-1 chu khong phai gpt-4o-transcribe: gpt-4o-transcribe la
@@ -227,13 +297,9 @@ async function mintClientSecret({
           // tha nut. Bat VAD lai la AI se tu noi khi nghe thay tieng vong loa.
           turn_detection: null,
         },
-        output: {
-          voice: process.env.REALTIME_VOICE || 'marin',
-          // Mac dinh cua bai hoc. Nguoi hoc de len bang session.update giua
-          // cac luot — API chi cho doi speed giua cac luot, khong doi duoc
-          // giua chung mot cau dang noi.
-          speed: clampSpeed(lesson.speed, clampSpeed(process.env.REALTIME_SPEED)),
-        },
+        // Khong con nhanh `output`: giong va toc do gio thuoc ve Polly. Toc do
+        // la `playbackRate` cua the <audio> nen doi duoc GIUA CHUNG mot cau,
+        // thu ma session.update cua Realtime API khong bao gio cho.
       },
       tools: buildTools(lesson),
       tool_choice: 'auto',
@@ -400,6 +466,28 @@ const routes: Route[] = [
 
   {
     method: 'GET',
+    pattern: /^\/api\/lessons\/([\w-]+)\/drill$/,
+    handler: async (_req, [id]): Promise<DrillResponse> => {
+      const lesson = lessons.get(id!);
+      if (!lesson) throw new HttpError(404, 'Khong tim thay bai hoc');
+      if (!polly) return { enabled: false, avatarUrl: null, items: [] };
+
+      // Lan goi dau cho mot bai co the mat vai giay (mot request Polly cho moi
+      // cau). Cac lan sau doc tu cache tren dia, va tu cache RAM nay thi khong
+      // cham dia nua. Lesson khong doi luc chay nen cache khong can het han.
+      let pending = drillCache.get(id!);
+      if (!pending) {
+        pending = buildDrill(polly, lesson);
+        drillCache.set(id!, pending);
+        // Hong thi xoa di de lan goi sau thu lai, khong ghim loi vinh vien.
+        pending.catch(() => drillCache.delete(id!));
+      }
+      return { enabled: true, avatarUrl: AVATAR_URL, items: await pending };
+    },
+  },
+
+  {
+    method: 'GET',
     pattern: /^\/api\/sessions$/,
     handler: () =>
       db.listSessions().map((s) => ({
@@ -524,7 +612,7 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/api\/sessions\/([\w-]+)$/,
-    handler: (req, [id], res) => {
+    handler: async (req, [id], res) => {
       const { session, lesson } = requireSession(id);
 
       // Man tong ket la cho duy nhat nghe lai, nen cap quyen nghe ngay tai day
@@ -533,6 +621,9 @@ const routes: Route[] = [
       const signed = isNativeClient(req);
 
       return {
+        // Nghe lai cau AI bang cach doc lai bang Polly (khi khong bat luu mp3).
+        // Credential cua buoi hoc do da het han tu lau nen phai la ban moi.
+        pollyGrant: await pollyGrantFor(req, session.user_id),
         sessionId: session.id,
         status: session.status,
         startedAt: session.started_at,
@@ -589,7 +680,35 @@ const routes: Route[] = [
         // Cap lai moi lan xin token: buoi hoc dai hon han cua grant, hoac
         // reconnect sau khi treo may lau, thi quyen ghi cu da het han.
         uploadGrant: audio.uploadGrant(id),
+        // Ky MOT LAN cho ca buoi. Han 1 tieng, dai hon moi buoi hoc, nen client
+        // khong phai hoi lai giua chung — do la ca diem cua viec cap credential
+        // thay vi ky tung cau.
+        pollyGrant: await pollyGrantFor(req, session.user_id),
+        avatarUrl: AVATAR_URL,
       };
+    },
+  },
+
+  /**
+   * Cap lai rieng quyen goi Polly, khong dung chung duong voi `/token`.
+   *
+   * Credential rang vao IP nen doi Wi-Fi <-> 4G la no chet — chuyen thuong
+   * ngay tren mobile. Di lai `/token` chi de lay grant thi mint thua mot client
+   * secret cua OpenAI va dung lai ca ngu canh resume, tat ca deu bi vut di.
+   */
+  {
+    method: 'POST',
+    pattern: /^\/api\/sessions\/([\w-]+)\/polly$/,
+    handler: async (req, [id]) => {
+      const { session } = requireSession(id);
+      const quota = db.quotaFor(session.user_id);
+      if (quota.remainingMs <= 0) {
+        throw new HttpError(429, 'Het thoi luong mien phi hom nay', {
+          code: 'quota_exhausted',
+          ...quota,
+        });
+      }
+      return { pollyGrant: await pollyGrantFor(req, session.user_id) };
     },
   },
 
@@ -649,7 +768,7 @@ const routes: Route[] = [
       }
 
       const buf = await readBody(req);
-      if (buf.length < 45) throw new HttpError(400, 'File WAV rong');
+      if (buf.length < 45) throw new HttpError(400, 'File audio rong');
 
       const role = req.headers['x-role'] === 'assistant' ? 'assistant' : 'user';
       const durationMs = Number(req.headers['x-duration-ms']) || null;

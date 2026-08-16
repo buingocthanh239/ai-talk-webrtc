@@ -1,11 +1,18 @@
 import { api } from './api.ts';
 import { LessonSession } from './session.ts';
 import type { PttState, SessionHandlers } from './session.ts';
+// Chi lay KIEU o day. Module that duoc nap bang dynamic import trong
+// openDrill(), vi no keo theo three.js — xem build.js.
+import type { DrillScreen } from './drill.ts';
+import type { TalkAvatar } from './talk-avatar.ts';
+import { synthesize } from './polly-client.ts';
 
 import type {
   Lesson,
   Message,
   ObjectiveProgress,
+  PollyEngine,
+  PollyGrant,
   Quota,
   Role,
   SessionDetail,
@@ -38,14 +45,33 @@ function el<K extends keyof HTMLElementTagNameMap>(
 const screens = {
   home: $('screen-home'),
   live: $('screen-live'),
+  drill: $('screen-drill'),
   summary: $('screen-summary'),
 };
+
+/** null cho toi lan dau mo man luyen khau hinh. Xem openDrill(). */
+let drill: DrillScreen | null = null;
+
+/** Avatar cua man hoi thoai. null khi chua dung xong hoac da roi man. */
+let talkAvatar: TalkAvatar | null = null;
+/** Dung nap hai lan khi reconnect — moi lan connect deu bao lai avatarUrl. */
+let talkAvatarLoading = false;
 
 /** `catch (err)` cho ra `unknown` duoi strict — boc mot lan o day. */
 const errorMessage = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
 
 function showScreen(name: keyof typeof screens): void {
+  // Man luyen khau hinh giu rAF cho ca avatar lan thanh do; roi man ma khong
+  // dong thi no ve tiep duoi nen, an pin va CPU cho toi khi dong tab.
+  if (name !== 'drill') drill?.close();
+  // Cung ly do: avatar cua man hoi thoai giu mot vong rAF cua three.js.
+  if (name !== 'live') {
+    talkAvatar?.dispose();
+    talkAvatar = null;
+    $('talk-avatar').classList.add('hidden');
+  }
+
   for (const [key, node] of Object.entries(screens)) {
     node.classList.toggle('hidden', key !== name);
   }
@@ -104,6 +130,8 @@ async function loadHome(): Promise<void> {
     })
   );
 
+  renderDrillEntry(lessons);
+
   const history = $('history-list');
   if (sessions.length === 0) {
     history.replaceChildren(el('p', 'empty', 'Chưa có buổi học nào được lưu.'));
@@ -152,10 +180,76 @@ async function loadHome(): Promise<void> {
   );
 }
 
+/**
+ * Loi vao man luyen khau hinh.
+ *
+ * Khong nhet duoc vao `.lesson-card` vi the do da la mot <button> — long
+ * button trong button la HTML khong hop le va Safari bo hin nut ben trong.
+ */
+function renderDrillEntry(lessons: Lesson[]): void {
+  const section = $('drill-entry');
+  section.classList.toggle('hidden', lessons.length === 0);
+
+  $('drill-lessons').replaceChildren(
+    ...lessons.map((lesson) => {
+      const chip = el('button', 'ghost-btn small', lesson.title);
+      chip.onclick = () => openDrill(lesson);
+      return chip;
+    })
+  );
+}
+
+async function openDrill(lesson: Lesson): Promise<void> {
+  showScreen('drill');
+  $('drill-title').textContent = `Luyện khẩu hình — ${lesson.title}`;
+  $('drill-status').textContent = 'Đang tải…';
+
+  if (!drill) {
+    try {
+      const { createDrillScreen } = await import('./drill.ts');
+      drill = createDrillScreen({
+        root: screens.drill,
+        list: $('drill-list'),
+        canvas: $<HTMLCanvasElement>('drill-canvas'),
+        avatarNote: $('drill-avatar-note'),
+        bars: $('drill-bars'),
+        hint: $('drill-hint'),
+        phrase: $('drill-phrase'),
+        audio: $<HTMLAudioElement>('drill-audio'),
+        playBtn: $<HTMLButtonElement>('drill-play'),
+        rateBtns: $('drill-rates'),
+        scrub: $<HTMLInputElement>('drill-scrub'),
+        status: $('drill-status'),
+      });
+    } catch (err) {
+      $('drill-status').textContent = `Không tải được màn luyện khẩu hình: ${errorMessage(err)}`;
+      return;
+    }
+  }
+  await drill.open(lesson.id);
+}
+
 // ─────────────────────────────────── live ───────────────────────────────────
 
 let active: LessonSession | null = null;
 const bubbles = new Map<number, HTMLElement>();
+
+/**
+ * The chuc mung hoan thanh bai hoc.
+ *
+ * Day la LOI MOI bam Ket thuc chu khong phai thong bao thoang qua, nen no
+ * khong tu tat — tat sau vai giay la mat dung phan quan trong nhat. Nguoi hoc
+ * dong duoc, va van hoc tiep duoc: tool call khong dung hoi thoai, luc the nay
+ * bat thi AI con dang noi not cau cua no.
+ */
+function showCongrats(doneCount: number, totalCount: number): void {
+  $('congrats-count').textContent = totalCount > 0 ? `Đủ ${doneCount}/${totalCount} mục tiêu.` : '';
+  $('congrats').classList.remove('hidden');
+}
+
+function hideCongrats(): void {
+  $('congrats').classList.add('hidden');
+}
 
 function setBanner(text: string | null, kind?: 'info' | 'warn' | 'error'): void {
   const banner = $('status-banner');
@@ -327,9 +421,9 @@ function setPttUi(state: PttState): void {
   $<HTMLInputElement>('text-input').disabled = state !== 'ready';
   $<HTMLButtonElement>('btn-send').disabled = state !== 'ready';
 
-  // Realtime API chi doi duoc speed giua cac luot. Khoa slider luc AI dang
-  // noi de nguoi hoc khong keo roi tuong la khong an gi.
-  $<HTMLInputElement>('speed-range').disabled = state !== 'ready';
+  // Slider toc do khong con bi khoa: no la playbackRate cua the <audio> nen
+  // keo giua luc AI dang doc la nghe thay doi ngay. Truoc day phai khoa vi
+  // Realtime API chi nhan session.update giua cac luot.
 }
 
 // ------------------------------------------------------------ toc do AI
@@ -347,6 +441,108 @@ function storedSpeed(): number | null {
 function renderSpeed(value: number): void {
   $<HTMLInputElement>('speed-range').value = String(value);
   $('speed-value').textContent = `${value.toFixed(2).replace(/0$/, '')}×`;
+}
+
+// ------------------------------------------------------------ giong doc
+
+const VOICE_KEY = 'ai-learn:voice';
+const ENGINE_KEY = 'ai-learn:engine';
+const SAVE_AUDIO_KEY = 'ai-learn:save-ai-audio';
+
+/**
+ * Danh sach giong ghi cung thay vi goi `DescribeVoices`.
+ *
+ * Goi DescribeVoices nghia la them mot API nua phai ky tu browser, de lay ve
+ * mot danh sach gan nhu khong bao gio doi. Khi nao Polly ra giong moi dang
+ * dung thi them mot dong o day.
+ */
+const VOICES: readonly { id: string; label: string }[] = [
+  { id: 'Joanna', label: 'Joanna — nữ, Mỹ' },
+  { id: 'Matthew', label: 'Matthew — nam, Mỹ' },
+  { id: 'Ruth', label: 'Ruth — nữ, Mỹ' },
+  { id: 'Stephen', label: 'Stephen — nam, Mỹ' },
+  { id: 'Amy', label: 'Amy — nữ, Anh' },
+  { id: 'Brian', label: 'Brian — nam, Anh' },
+  { id: 'Olivia', label: 'Olivia — nữ, Úc' },
+];
+
+const ENGINES: readonly PollyEngine[] = ['standard', 'neural', 'long-form'];
+
+const storedEngine = (): PollyEngine => {
+  const raw = localStorage.getItem(ENGINE_KEY);
+  return ENGINES.includes(raw as PollyEngine) ? (raw as PollyEngine) : 'neural';
+};
+
+const storedVoice = (): string => localStorage.getItem(VOICE_KEY) ?? 'Joanna';
+
+const storedSaveAudio = (): boolean => localStorage.getItem(SAVE_AUDIO_KEY) === '1';
+
+function buildVoicePanel(): void {
+  const select = $<HTMLSelectElement>('voice-select');
+  select.replaceChildren(
+    ...VOICES.map(({ id, label }) => {
+      const option = document.createElement('option');
+      option.value = id;
+      option.textContent = label;
+      return option;
+    })
+  );
+  select.value = storedVoice();
+  $<HTMLSelectElement>('engine-select').value = storedEngine();
+  $<HTMLInputElement>('save-audio').checked = storedSaveAudio();
+}
+
+/** Doi giong: ap dung tu khuc KE TIEP, khuc dang doc thi de yen. */
+function applyVoice(): void {
+  const voiceId = $<HTMLSelectElement>('voice-select').value;
+  const engine = $<HTMLSelectElement>('engine-select').value as PollyEngine;
+  localStorage.setItem(VOICE_KEY, voiceId);
+  localStorage.setItem(ENGINE_KEY, engine);
+  active?.setVoice(voiceId, engine);
+}
+
+buildVoicePanel();
+
+$<HTMLSelectElement>('voice-select').onchange = applyVoice;
+$<HTMLSelectElement>('engine-select').onchange = applyVoice;
+
+$<HTMLInputElement>('save-audio').onchange = (e) => {
+  const enabled = (e.currentTarget as HTMLInputElement).checked;
+  localStorage.setItem(SAVE_AUDIO_KEY, enabled ? '1' : '');
+  active?.setSaveAiAudio(enabled);
+};
+
+// ------------------------------------------------------ avatar hoi thoai
+
+/**
+ * Dung avatar cho man hoi thoai.
+ *
+ * Nap bang dynamic import giong `openDrill()`: no keo theo three.js, va nguoi
+ * hoc khong cau hinh avatar thi khong co ly do tai ve.
+ *
+ * Goi lai moi lan bat tay (ke ca reconnect) nen phai chan dung hai lan — mot
+ * lan reconnect giua buoi la du de co hai avatar cung ve len mot canvas.
+ */
+async function mountTalkAvatar(avatarUrl: string | null): Promise<void> {
+  if (talkAvatar || talkAvatarLoading) return;
+  talkAvatarLoading = true;
+  try {
+    const { createTalkAvatar } = await import('./talk-avatar.ts');
+    $('talk-avatar').classList.remove('hidden');
+    talkAvatar = await createTalkAvatar({
+      canvas: $<HTMLCanvasElement>('talk-canvas'),
+      note: $('talk-avatar-note'),
+      audio: $<HTMLAudioElement>('ai-audio'),
+      avatarUrl,
+    });
+  } catch (err) {
+    // Avatar la phan trang tri cua buoi hoc, khong phai duong song. Hong thi
+    // ghi log va hoc tiep bang chu va tieng.
+    console.warn('[avatar]', errorMessage(err));
+    $('talk-avatar').classList.add('hidden');
+  } finally {
+    talkAvatarLoading = false;
+  }
 }
 
 function sendTyped(): void {
@@ -414,6 +610,8 @@ function prepareLiveScreen(lesson: Lesson): void {
   $('transcript').replaceChildren();
   $('hint-chips').replaceChildren();
   $<HTMLButtonElement>('btn-finish').disabled = true;
+  $<HTMLButtonElement>('btn-finish').classList.remove('urging');
+  hideCongrats();
   setBanner(null);
   renderPanel(lesson);
   renderObjectives(lesson.objectives.map((o) => ({ ...o, status: 'pending' as const, evidence: null })));
@@ -552,11 +750,26 @@ async function runSession({
       },
 
       // Nut Ket thuc da mo san tu luc live — day chi la loi goi y.
-      canFinish({ note }) {
-        setBanner(note || 'Bạn đã đủ điều kiện kết thúc bài học.', 'info');
+      canFinish({ note, completed, doneCount, totalCount }) {
+        // Nut Ket thuc luon duoc lam noi — the chuc mung co the bi dong, chi
+        // dan khong duoc bien mat theo.
+        $<HTMLButtonElement>('btn-finish').classList.add('urging');
+
+        if (completed) showCongrats(doneCount, totalCount);
+        else setBanner(note || 'Bạn đã đủ điều kiện kết thúc bài học.', 'info');
       },
 
       quota: setQuota,
+
+      // Timeline cua khuc AI vua bat dau doc. Day la thu duong audio cu khong
+      // bao gio cho duoc — Realtime API khong phat ra viseme nao.
+      visemes(frames) {
+        talkAvatar?.load(frames);
+      },
+
+      avatar(avatarUrl) {
+        void mountTalkAvatar(avatarUrl);
+      },
 
       quotaExhausted() {
         stopQuotaClock();
@@ -571,6 +784,9 @@ async function runSession({
   });
 
   renderSpeed(active.speed);
+  // Lua chon cua nguoi hoc song lau hon mot buoi hoc, nen ap lai moi lan mo.
+  active.setVoice(storedVoice(), storedEngine());
+  active.setSaveAiAudio(storedSaveAudio());
 
   try {
     await active.start({ resume });
@@ -586,6 +802,15 @@ async function runSession({
 $<HTMLButtonElement>('btn-hint').onclick = (e) => {
   (e.currentTarget as HTMLButtonElement | null)?.blur();
   active?.requestVoiceHint();
+};
+
+$<HTMLButtonElement>('congrats-close').onclick = hideCongrats;
+
+// Bam thang vao nut that thay vi nhan doi luong ket thuc — mot cho sua, va
+// khong the lech nhau.
+$<HTMLButtonElement>('congrats-finish').onclick = () => {
+  hideCongrats();
+  $<HTMLButtonElement>('btn-finish').click();
 };
 
 $<HTMLInputElement>('speed-range').oninput = (e) => {
@@ -771,11 +996,48 @@ function renderReplay(body: HTMLElement, session: SessionDetail): void {
       audio.preload = 'none';
       audio.src = m.audioUrl;
       row.append(audio);
+    } else if (m.role === 'assistant' && m.text && session.pollyGrant) {
+      // Khong bat luu mp3 thi khong co file nao ca — doc lai bang Polly ngay
+      // luc bam. Ton them tien moi lan nghe, doi lai buoi hoc khong phai luu
+      // gi, va ban doc lai nay co du viseme neu sau nay muon xem khau hinh.
+      row.append(speakAgainButton(m.text, session.pollyGrant));
     } else {
       row.append(el('div', 'no-audio', 'không có audio'));
     }
     body.append(row);
   }
+}
+
+/**
+ * Nut doc lai mot cau cua AI bang Polly.
+ *
+ * Chi doc mot lan roi giu lai the <audio>: bam nghe di nghe lai la chuyen binh
+ * thuong o man tong ket, va moi lan goi Polly la mot lan tra tien.
+ */
+function speakAgainButton(text: string, grant: PollyGrant): HTMLElement {
+  const button = el('button', 'ghost-btn', '🔊 Đọc lại');
+
+  button.onclick = async () => {
+    (button as HTMLButtonElement).disabled = true;
+    button.textContent = 'Đang đọc…';
+    try {
+      const { url } = await synthesize(grant, text, {
+        voiceId: storedVoice(),
+        engine: storedEngine(),
+      });
+      const audio = el('audio') as HTMLAudioElement;
+      audio.controls = true;
+      audio.src = url;
+      button.replaceWith(audio);
+      await audio.play().catch(() => {});
+    } catch (err) {
+      button.textContent = '🔊 Đọc lại';
+      (button as HTMLButtonElement).disabled = false;
+      setBanner(`Không đọc lại được: ${errorMessage(err)}`, 'error');
+    }
+  };
+
+  return button;
 }
 
 let sequentialPlayer: HTMLAudioElement | null = null;
@@ -819,5 +1081,6 @@ async function openSavedSession(id: string): Promise<void> {
 }
 
 $<HTMLButtonElement>('btn-home').onclick = loadHome;
+$<HTMLButtonElement>('btn-drill-home').onclick = loadHome;
 
 loadHome();

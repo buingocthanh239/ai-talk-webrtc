@@ -13,6 +13,8 @@ export interface RealtimeEvent {
   type: string;
   delta?: string;
   transcript?: string;
+  /** `response.output_text.done` mang chu o day, khong phai `transcript`. */
+  text?: string;
   item_id?: string;
   call_id?: string;
   name?: string;

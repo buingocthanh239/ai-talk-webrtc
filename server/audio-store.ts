@@ -40,8 +40,17 @@ if (s3 && !cdn) {
 
 // ------------------------------------------------------------------- key
 
+/**
+ * Duoi file theo vai, khong phai theo lua chon.
+ *
+ * Doan cua nguoi hoc la WAV cat ra tu ring buffer PCM. Cau cua AI la MP3 lay
+ * nguyen tu Polly — giai ma roi ma hoa lai thanh WAV chi de dong duoi file thi
+ * vua ton CPU vua lam file to len nhieu lan.
+ */
+const fileExt = (role: Role): string => (role === 'assistant' ? 'mp3' : 'wav');
+
 const fileName = (seq: number, role: Role): string =>
-  `${String(seq).padStart(3, '0')}-${role}.wav`;
+  `${String(seq).padStart(3, '0')}-${role}.${fileExt(role)}`;
 
 /**
  * Key tren S3 va duong dan tuong doi tren dia co y giu cung hinh dang, chi
@@ -66,6 +75,8 @@ export function uploadGrant(sessionId: string, at: number = Date.now()): UploadG
     {
       keyPrefix: audioKeyPrefix(sessionId),
       contentType: 'audio/wav',
+      // Mot chu ky phai phu ca WAV cua nguoi hoc lan MP3 cua Polly.
+      contentTypePrefix: 'audio/',
       minBytes: MIN_BYTES,
       maxBytes: MAX_BYTES,
       expiresIn: GRANT_TTL_SEC,

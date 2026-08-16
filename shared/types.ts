@@ -101,6 +101,12 @@ export interface SessionDetail {
   lesson: Lesson;
   messages: Message[];
   summary: Summary | null;
+  /**
+   * Cap ngay tai day de man tong ket doc lai cau AI bang Polly ma khong phai
+   * xin them mot vong. Buoi hoc cu thi credential luc hoc da het han tu lau,
+   * nen phai la ban moi chu khong phai ban da luu.
+   */
+  pollyGrant: PollyGrant | null;
 }
 
 export interface SessionListItem {
@@ -143,6 +149,29 @@ export interface UploadGrant {
   expiresAt: number;
 }
 
+/** Engine `generative` khong nam trong day: no khong tra speech marks. */
+export type PollyEngine = 'standard' | 'neural' | 'long-form';
+
+/**
+ * Quyen goi Amazon Polly, cap mot lan cho ca buoi hoc.
+ *
+ * Client tu ky SigV4 va goi thang Polly — backend khong nam tren duong audio.
+ * Doi lai credential nam trong browser, nen no bi rang vao IP cua chinh client
+ * va co han ngan; xem `server/sts.ts`.
+ *
+ * null nghia la chua cau hinh STS: hoi thoai se khong co tieng noi cua AI.
+ */
+export interface PollyGrant {
+  region: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken: string;
+  expiresAt: number;
+  /** Giong mac dinh. Nguoi hoc doi duoc o phia client. */
+  voiceId: string;
+  engine: PollyEngine;
+}
+
 export interface TokenResponse {
   clientSecret: string;
   expiresAt: number;
@@ -150,4 +179,12 @@ export interface TokenResponse {
   seedItems: SeedItem[];
   progress: ProgressRecord[];
   uploadGrant: UploadGrant | null;
+  pollyGrant: PollyGrant | null;
+  /**
+   * File .glb cua avatar cho man hoi thoai. null thi khong dung avatar.
+   *
+   * Di kem token chu khong co endpoint rieng: day la thu duy nhat man hoi thoai
+   * con thieu, va no da goi `/token` roi.
+   */
+  avatarUrl: string | null;
 }

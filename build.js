@@ -18,7 +18,17 @@ const common = {
 };
 
 const builds = [
-  { ...common, entryPoints: ['public/src/main.ts'], outfile: 'public/js/bundle.js' },
+  {
+    ...common,
+    entryPoints: ['public/src/main.ts'],
+    // splitting + outdir thay vi outfile: man luyen khau hinh keo theo three.js
+    // (~1.2mb), va no duoc nap bang dynamic import trong main.ts. Gop mot cuc
+    // thi ai mo trang cung tai ca thu vien 3D du chi dinh vao hoi thoai.
+    outdir: 'public/js',
+    entryNames: 'bundle',
+    chunkNames: 'chunk-[hash]',
+    splitting: true,
+  },
   { ...common, entryPoints: ['public/src/pcm-worklet.ts'], outfile: 'public/js/pcm-worklet.js' },
 ];
 

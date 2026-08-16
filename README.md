@@ -1,12 +1,18 @@
 # AI Learn — luyện nói tiếng Anh với AI qua WebRTC
 
 Demo luồng học nói tiếng Anh thời gian thực bằng **OpenAI Realtime API over WebRTC**.
-Zero dependency — chỉ dùng core module của Node (`node:http`, `node:sqlite`), không cần `npm install`.
+
+**Backend zero dependency** — chỉ dùng core module của Node (`node:http`, `node:sqlite`, `node:crypto`).
+Ký SigV4 cho S3 và Polly, ký CloudFront đều viết tay, không kéo AWS SDK về.
+
+Client có đúng **một** runtime dependency: `three` cho avatar 3D ở màn luyện khẩu hình. Nó nằm ở
+chunk riêng, chỉ tải khi mở màn đó — `bundle.js` của phần hội thoại vẫn ~56KB.
 
 ## Chạy
 
 ```bash
 cp .env.example .env      # rồi điền OPENAI_API_KEY
+npm install               # esbuild + three
 npm start                 # http://localhost:3000
 ```
 
@@ -34,6 +40,22 @@ Ba lớp, cố ý không giao hết cho model:
 | Rule | cùng chỗ | Đủ mục tiêu `required` **và** đủ `minTurns` → mở nút "Kết thúc" |
 
 Model có thêm tool `end_lesson` để chủ động xin dừng, nhưng nó chỉ bật nút — user mới là người bấm.
+
+**Chúc mừng hoàn thành.** Khi đủ điều kiện thật, một thẻ nổi mời người học bấm Kết thúc để nhận đánh
+giá. Ba ràng buộc, mỗi cái chặn một kiểu hiển thị sai:
+
+| Ràng buộc | Chặn gì |
+|---|---|
+| Chỉ `reason = objectives_complete` | Chúc mừng người vừa xin dừng vì đuối (`learner_struggling`) |
+| `end_lesson` vẫn phải qua `#finishConditionsMet()` | Model quên gọi `mark_objective` → thẻ ghi "hoàn thành" ngay trên dòng "Đủ 2/3 mục tiêu" |
+| Chốt `#congratulated`, cả buổi một lần | `#maybeOfferFinish()` chạy sau **mỗi** `mark_objective` nên nó bắn lại ở mọi lượt sau đó |
+
+Thẻ **không tự tắt** — nó là lời mời bấm nút chứ không phải thông báo thoáng qua — và **không chặn
+màn hình**, vì lúc nó bật thì AI vẫn đang nói nốt câu của nó. Đóng thẻ rồi học tiếp thì nút "Kết
+thúc bài học" vẫn được làm nổi.
+
+**Xem model gọi tool nào:** mở DevTools console, `#onToolCall` in ra `[tool] <tên> {tham số}`. Đây
+là dấu vết duy nhất cho `end_lesson` — khác `mark_objective`, nó không chạm server và không ghi DB.
 
 ### 3. Summary & chấm điểm
 
@@ -100,27 +122,116 @@ Khi resume **không replay toàn bộ lịch sử** (tốn token, và session re
 6 lượt gần nhất được bơm lại nguyên văn qua `conversation.item.create`. Kèm theo trạng thái progress
 để AI không bắt user làm lại mục tiêu đã đạt. Rồi `response.create` với chỉ thị "đừng chào lại".
 
-Audio của message cũ không nạp lại được vào session mới — chỉ nạp text. Không sao, audio cũ vẫn nằm
-nguyên trong DB để phát lại.
+Audio của message cũ không nạp lại được vào session mới — chỉ nạp text. Không sao: đoạn ghi của
+người học vẫn nằm nguyên trong DB, còn câu của AI thì đọc lại được từ text bất cứ lúc nào.
 
 ## Tốc độ nói của AI
 
 Bài học đặt mặc định (`"speed": 0.85` trong lesson JSON), người học kéo slider đè lên được; lựa chọn
 được nhớ trong `localStorage` và áp dụng cho mọi bài sau đó.
 
-Realtime API **chỉ cho đổi tốc độ giữa các lượt**, không đổi giữa chừng một câu đang nói — nên
-slider bị khoá lúc `pttState !== 'ready'`, và thay đổi lúc AI đang nói sẽ được giữ lại rồi áp dụng
-ngay khi nút push-to-talk mở lại (`session.ts` → `#pendingSpeed`).
+Tốc độ là `playbackRate` của thẻ `<audio>` đang phát mp3 của Polly, với `preservesPitch` nên chậm
+0.5× vẫn đúng cao độ. **Đổi được ngay cả giữa chừng một câu**, và khẩu hình tự bám theo vì
+`VisemePlayer` đọc `audio.currentTime`.
 
-Hai điều dễ hiểu nhầm:
+Trước đây đây là `session.update` của Realtime API, vốn chỉ nhận giữa các lượt — nên slider phải
+khoá lúc AI đang nói và thay đổi bị xếp hàng chờ. Cả cơ chế đó đã bỏ.
 
-- **Đây là hậu kỳ trên audio đã sinh, không phải model nói chậm lại.** Nó không làm AI chọn từ dễ
-  hơn hay ngắt nghỉ nhiều hơn — muốn vậy thì phải viết vào `instructions` (`server/prompt.ts`).
-  Nói chậm mà câu vẫn phức tạp thì gần như không giúp được người mới học.
-- **Các mốc thời gian đo bằng thời gian AI nói phải chia cho `speed`.** Ở 0.5x, một câu 10 giây kéo
-  thành 20 giây; để nguyên thì trần mở nút (8s) sẽ trả nút lại giữa lúc AI đang nói, và vòng dò im
-  lặng (12s) hết hạn trước khi AI nói xong làm đoạn WAV bị cắt cụt — chấm phát âm sai theo. Xem
-  `#scaled()` trong `session.ts`.
+**Điều dễ hiểu nhầm: đây là hậu kỳ trên audio đã sinh, không phải model nói chậm lại.** Nó không
+làm AI chọn từ dễ hơn hay ngắt nghỉ nhiều hơn — muốn vậy thì phải viết vào `instructions`
+(`server/prompt.ts`). Nói chậm mà câu vẫn phức tạp thì gần như không giúp được người mới học.
+
+## Luyện khẩu hình (Amazon Polly + avatar 3D)
+
+Một màn riêng, **không dùng WebRTC và không tốn hạn mức gọi**: chọn một từ hoặc câu mẫu của bài,
+xem avatar 3D diễn khẩu hình, kéo chậm xuống 0.4× và tua về đúng âm vừa sai.
+
+Chi tiết luồng và các phương án đã loại: [`docs/lip-sync.md`](docs/lip-sync.md).
+
+**Hội thoại giờ cũng có khẩu hình** — xem mục dưới. Màn luyện vẫn giữ riêng vì nó là chỗ dừng lại,
+kéo chậm và tua đi tua lại; giữa hội thoại AI nói ~150 từ/phút thì không ai làm được việc đó.
+
+Text biết trước nên không phải đoán gì: Polly trả thẳng **speech marks** kèm mốc ms cho từng viseme.
+
+```
+lesson.vocabulary + objectives.examples
+  → Polly SynthesizeSpeech ×2  (mp3  +  speech marks)
+  → map 17 viseme Polly → 15 viseme Oculus
+  → cache data/audio/drill/<id>.{mp3,json}
+  → GET /api/lessons/:id/drill
+  → VisemePlayer bám audio.currentTime → morph target của avatar
+```
+
+Ba tầng tách rời để khi mồm avatar đứng im thì biết ngay lỗi ở đâu: Polly (dữ liệu) →
+`viseme-player.ts` (trọng số) → `avatar.ts` (vẽ). **15 thanh đo viseme luôn hiện cạnh avatar**,
+kể cả khi không cấu hình `AVATAR_URL` — đó là cách nhanh nhất để phân biệt "dữ liệu không chạy" với
+"model không có morph target".
+
+**Ba điều dễ vấp:**
+
+- **Engine `generative` KHÔNG hỗ trợ speech marks** (`ValidationException`). Chỉ `standard`,
+  `neural`, `long-form`. Server từ chối ngay lúc khởi động nếu đặt sai, kèm lý do.
+- **Phải gọi Polly hai lần.** Speech marks trả về *thay cho* audio chứ không kèm theo. Cùng
+  `Text` + `VoiceId` + `Engine` thì mốc thời gian khớp nhau. Hai request chạy song song.
+- **Avatar Ready Player Me phải tải kèm `?morphTargets=Oculus Visemes`.** Thiếu tham số đó thì
+  model vẫn hiện ra bình thường nhưng không có khẩu hình nào và không báo lỗi gì.
+
+**Chi phí:** hai bài hiện có cộng lại 527 ký tự → khoảng **$0.017 một lần** (neural, $16/1M, nhân
+đôi vì hai request). Cache vĩnh viễn theo `(giọng, engine, text)` nên chỉ sinh lại khi thêm bài
+hoặc đổi giọng. Free tier neural còn 1 triệu ký tự/tháng.
+
+**Giới hạn đã biết — rig không có lưỡi.** Với người Việt học tiếng Anh, những phân biệt khó nhất
+lại nằm ở lưỡi: θ/ð (lưỡi giữa hai răng), l vs n, âm r. Avatar RPM không có lưỡi, morph target gần
+như chỉ có môi và hàm. Polly cho dữ liệu đúng nhưng rig không diễn ra được. Bù tạm bằng
+`VISEME_HINT_VI` trong `shared/viseme.ts` — mỗi khẩu hình kèm một dòng tiếng Việt nói rõ vị trí
+lưỡi. Đây là bù đắp, không phải giải pháp; muốn giải thật thì phải đổi sang model có morph lưỡi,
+và việc đó không đụng tới tầng dữ liệu.
+
+## Tiếng nói của AI trong hội thoại (Polly, gọi thẳng từ client)
+
+Session Realtime chạy `output_modalities: ["text"]` — **OpenAI chỉ nghe và trả về chữ.** Client gom
+chữ thành từng khúc, tự ký SigV4 và gọi thẳng Amazon Polly lấy mp3 kèm viseme, rồi tự phát.
+
+```
+response.output_text.delta
+  → SentenceChunker           khúc đầu 15–40 ký tự, khúc sau tới 200
+  → Polly SynthesizeSpeech ×2  (client tự ký, không qua backend)
+  → <audio src=blob:> + VisemePlayer → avatar nhép ngay trong hội thoại
+```
+
+**Vì sao đổi.** Realtime API không phát ra viseme/phoneme nào, nên chừng nào tiếng nói còn đến từ
+nó thì avatar chỉ có thể đoán từ phổ âm thanh — đúng nhịp, sai âm vị. Với app dạy phát âm thì nhép
+sai là dạy sai. Cho model trả text rồi tự đọc thì viseme lại chính xác theo định nghĩa.
+
+Lý do từng loại phương án này (*"mất cơ chế ngắt lời tự nhiên"*) **sai ngay từ đầu**: app đã chạy
+`turn_detection: null` + push-to-talk, không có barge-in nào để mất.
+
+**Vì sao client gọi thẳng chứ không qua backend.** Toàn bộ độ trễ người học cảm thấy nằm ở khúc đầu
+tiên của mỗi lượt — các khúc sau được đọc trong lúc khúc trước đang phát nên không lộ ra. Một vòng
+round trip qua backend nằm đúng trên đường nóng đó, và cắt khúc càng nhỏ thì càng tốn nhiều vòng.
+
+Backend chỉ `AssumeRole` một lần cho cả buổi rồi đưa credential tạm cho client:
+
+- session policy chỉ cho `polly:SynthesizeSpeech`, ràng vào **IP của chính client**
+  (`aws:SourceIp`) và có `DateLessThan` cứng
+- `DateLessThan` cắt được hạn xuống dưới sàn 900 giây của `AssumeRole`
+- đổi Wi-Fi ↔ 4G là 403 → client xin lại qua `POST /api/sessions/:id/polly`
+
+**Đổi lại được gì trong code:** bỏ audio output của Realtime cũng xoá luôn `TrackRecorder` cho
+remote track, vòng dò im lặng 300ms/12s để *đoán* khi nào AI nói xong, và trần an toàn đi kèm.
+"AI nói xong" giờ là sự kiện chắc chắn: hàng đợi đọc cạn. Tốc độ đọc là `playbackRate` của thẻ
+`<audio>` (có `preservesPitch`) nên đổi được **giữa chừng một câu** — `session.update` của Realtime
+API chỉ cho đổi giữa các lượt.
+
+**Cái mất, có ý thức:** prosody của giọng Realtime. Polly neural phẳng hơn rõ.
+
+**Ba chỗ chưa ai chạy thử** (đã quyết định bỏ spike để đi nhanh — xem
+[spec](docs/superpowers/specs/2026-08-16-client-side-tts-viseme-design.md) mục 6):
+
+- Polly có trả CORS header cho preflight `OPTIONS` không. Không có đường lùi qua backend
+- Chữ ký SigV4 chưa từng được AWS chấp nhận thật — hỏng thì hỏng cả hai màn
+- `crypto.subtle` chỉ có trong secure context: `http://localhost` được, `http://192.168.x.x`
+  **không** — mở trên điện thoại cùng LAN sẽ thấy nó `undefined` chứ không phải lỗi chữ ký
 
 ## Lớp gợi ý
 
@@ -135,20 +246,41 @@ Hai kênh cho hai tình huống khác nhau:
 
 ```
 server/
-  index.js      HTTP + routing, mint ephemeral token
-  db.js         SQLite schema + query
-  prompt.js     rap instructions, nén ngữ cảnh khi reconnect
-  tools.js      định nghĩa tool cho model
-  grader.js     chấm điểm sau buổi (text + audio)
+  index.ts      HTTP + routing, mint ephemeral token
+  db.ts         SQLite schema + query
+  prompt.ts     rap instructions, nén ngữ cảnh khi reconnect
+  tools.ts      định nghĩa tool cho model
+  grader.ts     chấm điểm sau buổi (text + audio)
+  s3.ts         ký SigV4 + presigned POST/GET
+  cdn.ts        ký CloudFront
+  polly.ts      ký SigV4 cho Polly (đường server, dùng cho drill)
+  sts.ts        AssumeRole → credential tạm cho client gọi Polly
+  drill.ts      dựng + cache bài luyện khẩu hình cho một lesson
   lessons/      bài học dạng JSON
+shared/         kiểu + logic dùng chung hai phía
+  types.ts      hình dạng JSON qua ranh giới HTTP
+  speed.ts      chặn tốc độ nói
+  chunk.ts      cắt dòng text của AI thành khúc gửi lên Polly
+  viseme.ts     map Polly → Oculus, đọc speech marks, gợi ý khẩu hình VI
 public/
-  index.html    3 màn: chọn bài / đang học / tổng kết
-  js/realtime.js   transport WebRTC thuần
-  js/recorder.js   ghi PCM liên tục + cắt WAV theo message
-  js/session.js    điều phối buổi học, reconnect, gợi ý, điểm dừng
-  js/main.js       DOM
+  index.html    4 màn: chọn bài / đang học / luyện khẩu hình / tổng kết
+  src/realtime.ts      transport WebRTC thuần
+  src/recorder.ts      ghi PCM liên tục + cắt WAV theo message (chỉ mic)
+  src/session.ts       điều phối buổi học, reconnect, gợi ý, điểm dừng
+  src/polly-client.ts  ký SigV4 bằng WebCrypto, gọi thẳng Polly
+  src/speech-queue.ts  cắt khúc → đọc trước → phát đúng thứ tự
+  src/main.ts          DOM
+  src/drill.ts         màn luyện khẩu hình (nạp bằng dynamic import)
+  src/talk-avatar.ts   avatar cho màn hội thoại (dynamic import)
+  src/viseme-player.ts timeline → trọng số, bám audio.currentTime
+  src/avatar.ts        three.js + morph target
 data/           app.db + audio/ (tự tạo, đã gitignore)
+                audio/drill/ = cache mp3 + viseme của Polly
 ```
+
+Client build bằng esbuild có **code splitting**: `drill.ts` và `talk-avatar.ts` được nạp bằng
+dynamic import nên three.js rơi vào chunk riêng, không nằm trong `bundle.js`. Ai không cấu hình
+avatar thì không bao giờ tải nó về.
 
 ## Cấu hình
 
@@ -156,8 +288,6 @@ data/           app.db + audio/ (tự tạo, đã gitignore)
 |---|---|---|
 | `OPENAI_API_KEY` | — | bắt buộc |
 | `REALTIME_MODEL` | `gpt-realtime` | model hội thoại |
-| `REALTIME_VOICE` | `marin` | giọng AI |
-| `REALTIME_SPEED` | `1` | tốc độ nói, chỉ dùng khi bài học không đặt `speed` |
 | `GRADER_TEXT_MODEL` | `gpt-4o` | chấm grammar/vocab/mục tiêu |
 | `GRADER_AUDIO_MODEL` | `gpt-4o-audio-preview` | để trống = tắt chấm phát âm |
 | `AUDIO_STORE` | `disk` | `s3` = client đẩy thẳng lên bucket |
@@ -166,6 +296,17 @@ data/           app.db + audio/ (tự tạo, đã gitignore)
 | `S3_ENDPOINT` | — | chỉ khi dev với MinIO; có giá trị = dùng path-style URL |
 | `CDN_DOMAIN` | — | để trống thì phát lại bằng presigned GET |
 | `CF_KEY_PAIR_ID` / `CF_PRIVATE_KEY_PATH` | — | bắt buộc khi có `CDN_DOMAIN` |
+| `POLLY` | `off` | `on` = bật Polly (màn luyện khẩu hình **và** tiếng nói của AI trong hội thoại) |
+| `POLLY_REGION` | theo `S3_REGION` | bucket và Polly không bắt buộc cùng vùng |
+| `POLLY_VOICE` | `Joanna` | đổi giọng = đổi cache key, sinh lại toàn bộ |
+| `POLLY_ENGINE` | `neural` | `standard` \| `neural` \| `long-form`. **Không** dùng được `generative` |
+| `POLLY_STS_ROLE_ARN` | — | để trống = AI **không nói được** trong hội thoại (vẫn hiện chữ). Role chỉ nên cho `polly:SynthesizeSpeech` |
+| `POLLY_STS_TTL_SEC` | `3600` | hạn credential tạm; AWS chặn trong 900..3600 |
+| `POLLY_STS_BIND_IP` | `on` | ràng credential vào IP client. Tắt khi sau reverse proxy không đặt `X-Forwarded-For` |
+| `AVATAR_URL` | — | file `.glb`; để trống thì chỉ hiện 15 thanh đo viseme |
+
+Polly dùng chung `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` với S3 — cùng một tài khoản AWS,
+không bắt khai hai lần.
 
 Thiếu biến bắt buộc thì server ngã ra ngay lúc khởi động, không đợi tới lúc người học nói xong câu
 đầu tiên mới phát hiện không lưu được audio.
@@ -175,10 +316,21 @@ Thêm bài học mới: bỏ một file JSON vào `server/lessons/` rồi restar
 ## Test
 
 ```bash
-npm test        # test vector SigV4 + chữ ký CloudFront (không cần mạng)
+npm test        # test vector SigV4 + chữ ký CloudFront + map viseme (không cần mạng)
 npm run test:s3 # thêm: chạy thật trên MinIO qua docker compose
 ```
 
 Test vector chỉ chứng minh mình ký ra đúng chuỗi đó; nó không chứng minh S3 **chấp nhận** chữ ký.
 Hai lỗi hay gặp nhất — thứ tự field trong `FormData` và điều kiện policy sai — chỉ lộ ra ở
 `npm run test:s3`. Không có `S3_ENDPOINT` thì các test đó tự skip.
+
+Phần viseme cũng vậy, và còn thiếu nhiều hơn. `shared/viseme.test.ts` và `server/polly.test.ts`
+phủ được bảng map, `frameAt`, đọc speech marks, định dạng header SigV4 và đọc config — toàn bộ đều
+là logic thuần, chạy offline. **Chưa được kiểm chứng:**
+
+- **Chưa gọi Polly thật.** Định dạng `Authorization` đã được AWS chấp nhận (lỗi trả về là
+  `UnrecognizedClientException` chứ không phải `SignatureDoesNotMatch`, nghĩa là header đọc được và
+  chỉ không tìm thấy access key), nhưng điều đó **không** chứng minh phép tính chữ ký đúng. Cần một
+  lần chạy với credential thật.
+- **Chưa render avatar 3D lần nào.** Ba nhánh hỏng (không cấu hình / tải lỗi / model thiếu morph
+  target) đều có mã xử lý và báo khác nhau, nhưng chưa ai nhìn thấy nó chạy.

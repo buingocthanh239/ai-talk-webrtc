@@ -2,10 +2,13 @@ import { api, ApiError, putAudioToS3 } from './api.ts';
 import { RealtimeConnection } from './realtime.ts';
 import type { RealtimeEvent } from './realtime.ts';
 import { TrackRecorder } from './recorder.ts';
+import { SpeechQueue } from './speech-queue.ts';
 
 import type {
   Lesson,
   ObjectiveProgress,
+  PollyEngine,
+  PollyGrant,
   ProgressRecord,
   ProgressStatus,
   Quota,
@@ -13,6 +16,7 @@ import type {
   SeedItem,
   UploadGrant,
 } from '../../shared/types.ts';
+import type { VisemeFrame } from '../../shared/viseme.ts';
 import { clampSpeed } from '../../shared/speed.ts';
 
 /** Trang thai nut push-to-talk. Chi 'ready' moi cho bat dau noi. */
@@ -30,10 +34,28 @@ export interface SessionHandlers {
   progress: (list: ObjectiveProgress[]) => void;
   hints: (list: string[]) => void;
   hintUsed: (level: number) => void;
-  canFinish: (info: { reason?: string; note?: string }) => void;
+  /**
+   * Du dieu kien ket thuc. `completed` chi true khi HOAN THANH THAT (du muc
+   * tieu bat buoc), va chi true DUNG MOT LAN ca buoi — nguoi hoc xin dung
+   * giua chung hay dang duoi thi khong phai luc chuc mung.
+   */
+  canFinish: (info: {
+    reason?: string;
+    note?: string;
+    completed: boolean;
+    doneCount: number;
+    totalCount: number;
+  }) => void;
   pttState?: (state: PttState) => void;
   quota?: (quota: Quota) => void;
   quotaExhausted?: () => void;
+  /**
+   * Timeline khau hinh cua khuc AI vua bat dau phat. Nap thang vao
+   * `VisemePlayer` — day la thu ma duong audio cu khong bao gio cho duoc.
+   */
+  visemes?: (frames: VisemeFrame[]) => void;
+  /** File .glb de dung avatar. Goi mot lan khi bat tay xong. */
+  avatar?: (avatarUrl: string | null) => void;
 }
 
 /** Mot luot noi dang cho: moc thoi gian trong recorder de cat WAV ve sau. */
@@ -47,9 +69,6 @@ interface PendingTurn {
 interface ActiveResponse {
   id: string | undefined;
   seq: number;
-  rec: TrackRecorder | null;
-  startMs: number;
-  endMs?: number;
   text: string;
 }
 
@@ -60,19 +79,6 @@ const BACKOFF_MS = [800, 2000, 4000, 8000, 15000];
 const PTT_TAIL_MS = 300;
 /** Doan ngan hon nguong nay coi nhu bam nham — khong gui. */
 const PTT_MIN_MS = 300;
-/**
- * Tran an toan: neu khong chot duoc luc AI ngung tieng thi van mo lai nut.
- *
- * Hai hang so duoi deu do bang thoi gian AI noi, nen phai chia cho `speed`:
- * o 0.5x mot cau 10 giay keo thanh 20 giay. Khong co giai thi tran 8s se mo
- * nut ngay giua luc AI dang noi, va vong do im lang het han truoc khi AI noi
- * xong — doan WAV bi cat cut, cham phat am sai theo. Loi nay chi xuat hien o
- * toc do cham, tuc la dung nhom nguoi hoc can tinh nang nay nhat.
- */
-const PTT_UNLOCK_FAILSAFE_MS = 8000;
-
-/** Tran thoi gian do im lang sau khi response.done — audio con phat not. */
-const SILENCE_WATCH_MS = 12000;
 
 /** Lich thu lai khi day audio hong. Ngan hon BACKOFF_MS: mat mot doan audio
  * khong lam hong buoi hoc, khong dang giu micro cua user lai 30 giay. */
@@ -124,7 +130,6 @@ export class LessonSession {
   #ctx: AudioContext | null = null;
   #micStream: MediaStream | null = null;
   #micRec: TrackRecorder | null = null;
-  #aiRec: TrackRecorder | null = null;
 
   #seq = 0;
   #pendingUser: PendingTurn[] = [];
@@ -134,16 +139,34 @@ export class LessonSession {
   #hintLevel = 0;
   #ptt: PendingTurn | null = null;
   #pttState: PttState = 'locked';
-  #unlockTimer: ReturnType<typeof setTimeout> | null = null;
   #reconnecting = false;
   #ended = false;
   #stopped = false;
   #progress = new Map<string, ProgressRecord>();
 
-  /** Toc do noi cua AI. Bat dau tu mac dinh cua bai hoc. */
+  /** Da chuc mung hoan thanh bai hoc chua. Ca buoi chi mot lan. */
+  #congratulated = false;
+
+  /** Toc do doc cua AI. Bat dau tu mac dinh cua bai hoc. */
   #speed: number;
-  /** Doi speed luc AI dang noi thi hoan lai — API chi cho doi giua cac luot. */
-  #pendingSpeed: number | null = null;
+
+  /** Bien text cua AI thanh tieng noi qua Polly. */
+  readonly #speech: SpeechQueue;
+
+  /**
+   * Cac khuc mp3 cua luot AI dang noi, gom lai de day len S3 khi bat luu.
+   *
+   * Mot luot noi bi cat thanh nhieu khuc nhung chi ung voi MOT message, nen
+   * phai noi lai truoc khi luu. MP3 la dong frame lien tiep nen noi thang byte
+   * la phat duoc, khong phai giai ma roi ma hoa lai.
+   */
+  #turnAudio: { blobs: Blob[]; durationMs: number } | null = null;
+
+  /** Message dang duoc doc. Hang doi canh sau `response.done` nen phai nho. */
+  #speakingSeq: number | null = null;
+
+  /** Bat thi luu mp3 cua AI len S3; tat thi nghe lai bang cach doc lai Polly. */
+  #saveAiAudio = false;
 
   /** Quyen ghi thang len S3. null = server dang luu audio tren dia. */
   #uploadGrant: UploadGrant | null = null;
@@ -182,41 +205,66 @@ export class LessonSession {
     this.#seq = startSeq;
     // Nguoi hoc da tung chinh thi dung so do, chua thi lay mac dinh cua bai.
     this.#speed = clampSpeed(speed ?? lesson.speed);
+
+    this.#speech = new SpeechQueue(audioElement, {
+      onChunk: (frames) => this.on.visemes?.(frames),
+      onDrain: () => this.#onSpeechDone(),
+      onError: (message) => console.warn('[tts]', message),
+      refreshGrant: () => this.#refreshPollyGrant(),
+      onAudio: (blob, _text, durationMs) => this.#collectTurnAudio(blob, durationMs),
+    });
+    this.#speech.setRate(this.#speed);
   }
 
-  // -------------------------------------------------------- toc do AI noi
+  // -------------------------------------------------------- toc do AI doc
 
   get speed(): number {
     return this.#speed;
   }
 
   /**
-   * Doi toc do noi cua AI.
+   * Doi toc do doc cua AI.
    *
-   * Realtime API chi cho doi speed GIUA cac luot, khong doi duoc giua chung
-   * mot cau dang noi. Nen goi luc AI dang noi thi giu lai, ap dung ngay khi
-   * nut push-to-talk mo lai.
+   * Truoc day day la `session.update` cua Realtime API, von chi doi duoc GIUA
+   * cac luot nen phai xep hang cho toi khi nut micro mo lai. Gio no la
+   * `playbackRate` cua the <audio>, doi duoc ngay ca giua chung mot cau.
    *
    * Tra ve gia tri that su duoc dat (da chan trong 0.25–1.5).
    */
   setSpeed(value: number): number {
     this.#speed = clampSpeed(value, this.#speed);
-    if (this.#pttState === 'ready') this.#applySpeed();
-    else this.#pendingSpeed = this.#speed;
+    this.#speech.setRate(this.#speed);
     return this.#speed;
   }
 
-  /** Gian mot moc thoi gian theo toc do noi hien tai. */
-  #scaled(ms: number): number {
-    return Math.round(ms / this.#speed);
+  // ---------------------------------------------------------- giong doc
+
+  /** Doi giong Polly. Ap dung tu khuc ke tiep, khong doc lai khuc dang phat. */
+  setVoice(voiceId: string, engine: PollyEngine): void {
+    this.#speech.setVoice(voiceId, engine);
   }
 
-  #applySpeed(): void {
-    this.#pendingSpeed = null;
-    this.#conn?.send({
-      type: 'session.update',
-      session: { type: 'realtime', audio: { output: { speed: this.#speed } } },
-    });
+  get voiceId(): string {
+    return this.#speech.voiceId;
+  }
+
+  get engine(): PollyEngine {
+    return this.#speech.engine;
+  }
+
+  /**
+   * Bat/tat luu mp3 cua AI len S3.
+   *
+   * Tat (mac dinh): khong luu gi, man tong ket doc lai bang Polly — ton tien
+   * moi lan bam nghe, doi lai co luon viseme de xem lai khau hinh.
+   * Bat: giu file, nghe lai khong ton them tien nhung ton luu tru.
+   */
+  setSaveAiAudio(enabled: boolean): void {
+    this.#saveAiAudio = enabled;
+  }
+
+  get saveAiAudio(): boolean {
+    return this.#saveAiAudio;
   }
 
   // ------------------------------------------------------------- han muc
@@ -308,15 +356,20 @@ export class LessonSession {
     // grant thi quyen ghi cu da het, va lan xin token nay la dip re nhat de
     // co cai moi.
     this.#uploadGrant = token.uploadGrant ?? null;
+    // Ky mot lan cho ca buoi. Cap lai o day la du: reconnect di qua chinh
+    // duong nay, va han cua grant dai hon moi buoi hoc.
+    this.#speech.setGrant(token.pollyGrant ?? null);
+    this.on.avatar?.(token.avatarUrl ?? null);
 
     for (const p of token.progress ?? []) {
       this.#progress.set(p.objectiveId, p);
     }
     this.on.progress(this.progressList());
 
+    // Khong dang ky onRemoteStream: session cau hinh output_modalities:["text"]
+    // nen OpenAI khong gui audio ve nua. The <audio> gio thuoc ve SpeechQueue.
     this.#conn = new RealtimeConnection({
       onEvent: (e) => this.#handleEvent(e),
-      onRemoteStream: (stream) => this.#attachRemote(stream),
       onDisconnect: (state) => this.#handleDisconnect(state),
     });
 
@@ -330,22 +383,27 @@ export class LessonSession {
     // lai SDP — re hon nhieu so voi them/bot track.
     this.#conn.setMicEnabled(false);
 
-    // Token mang mac dinh cua bai hoc; neu nguoi hoc da chinh khac thi day la
-    // luc dat lai. Gui vo dieu kien cho don gian — chua co luot nao chay nen
-    // chac chan dang o "giua cac luot", va push-to-talk thi user noi truoc.
-    this.#applySpeed();
-
     await this.#registerCall();
 
     if (resume) await this.#seedConversation(token.seedItems);
   }
 
-  async #attachRemote(stream: MediaStream): Promise<void> {
-    this.audioElement.srcObject = stream;
-    await this.audioElement.play().catch(() => {});
-    // Recorder moi cho moi ket noi — dong ho cua no bat dau lai tu 0,
-    // nen moi luot AI phai nho recorder ma no thuoc ve.
-    this.#aiRec = await TrackRecorder.create(this.#ctx!, stream);
+  /**
+   * Xin lai quyen goi Polly khi credential het han hoac lech IP (doi Wi-Fi
+   * sang 4G giua buoi hoc).
+   *
+   * Duong rieng chu khong goi lai `/token`: `/token` mint mot client secret
+   * moi cua OpenAI va dung lai ca ngu canh resume — tat ca deu bi vut di neu
+   * thu ta can chi la mot credential AWS.
+   */
+  async #refreshPollyGrant(): Promise<PollyGrant | null> {
+    if (this.#ended) return null;
+    try {
+      return (await api.getPollyGrant(this.sessionId)).pollyGrant;
+    } catch (err) {
+      console.warn('[tts] khong xin lai duoc quyen goi Polly:', errorMessage(err));
+      return null;
+    }
   }
 
   /**
@@ -383,6 +441,10 @@ export class LessonSession {
     this.#activeResponse = null;
     this.#hintsResponseId = null;
     this.#pendingUser = [];
+    // Doc not nua cau cua mot ket noi da chet chi lam nguoi hoc roi tri.
+    this.#speech.cancel();
+    this.#turnAudio = null;
+    this.#speakingSeq = null;
 
     console.warn('[rtc] mat ket noi:', state);
 
@@ -422,9 +484,12 @@ export class LessonSession {
     if (this.#stopped) return;
     this.#stopped = true;
     this.#ended = true;
-    if (this.#unlockTimer) clearTimeout(this.#unlockTimer);
     this.#setPttState('locked');
     this.#ptt = null;
+    // Truoc khi doi hang doi upload: `cancel()` co the sinh them mot doan can
+    // day (khuc mp3 cuoi cua luot dang doc dang do).
+    this.#flushTurnAudio();
+    this.#speech.cancel();
     this.#closePresence();
     this.#conn?.close();
 
@@ -449,7 +514,6 @@ export class LessonSession {
     ]);
 
     this.#micRec?.stop();
-    this.#aiRec?.stop();
     this.#micStream?.getTracks().forEach((t) => t.stop());
     await this.#ctx?.close().catch(() => {});
   }
@@ -485,18 +549,34 @@ export class LessonSession {
         this.#onResponseCreated(event.response);
         break;
 
-      // GA doi ten event; ho tro ca hai de khong phu thuoc phien ban
+      // Session dat output_modalities:["text"] nen chu ve bang hai event dau.
+      // Hai event audio_transcript giu lai lam luoi: neu cau hinh khong an
+      // (phien ban API khac, hoac ai do bat lai giong) thi it nhat chu van
+      // hien ra, thay vi mot bong bong rong khong ai hieu vi sao.
+      //
+      // Goi y chu tren man hinh cung di bang chinh cac event nay, nhung luc do
+      // `#activeResponse` la null (xem #onResponseCreated) — do la thu duy nhat
+      // tach hai dong chu ra khoi nhau.
+      case 'response.output_text.delta':
+      case 'response.text.delta':
       case 'response.output_audio_transcript.delta':
       case 'response.audio_transcript.delta':
         if (this.#activeResponse) {
-          this.#activeResponse.text = (this.#activeResponse.text ?? '') + (event.delta ?? '');
+          const delta = event.delta ?? '';
+          this.#activeResponse.text += delta;
           this.on.messageUpdate(this.#activeResponse.seq, this.#activeResponse.text);
+          // Cat khuc va doc ngay, khong doi het cau tra loi.
+          this.#speech.push(delta);
         }
         break;
 
+      case 'response.output_text.done':
+      case 'response.text.done':
       case 'response.output_audio_transcript.done':
       case 'response.audio_transcript.done':
-        if (this.#activeResponse) this.#activeResponse.text = event.transcript ?? '';
+        if (this.#activeResponse) {
+          this.#activeResponse.text = event.text ?? event.transcript ?? this.#activeResponse.text;
+        }
         break;
 
       case 'response.function_call_arguments.done':
@@ -519,8 +599,6 @@ export class LessonSession {
   #setPttState(state: PttState): void {
     if (this.#pttState === state) return;
     this.#pttState = state;
-    // Vua het luot cua AI — day la cua so duy nhat doi speed duoc.
-    if (state === 'ready' && this.#pendingSpeed !== null) this.#applySpeed();
     this.on.pttState?.(state);
   }
 
@@ -632,8 +710,6 @@ export class LessonSession {
 
   /** Mo lai nut sau khi AI da noi het cau. */
   #unlockPtt(): void {
-    if (this.#unlockTimer) clearTimeout(this.#unlockTimer);
-    this.#unlockTimer = null;
     if (this.#ended) return;
     if (this.#pttState === 'ai' || this.#pttState === 'thinking') this.#setPttState('ready');
   }
@@ -687,13 +763,9 @@ export class LessonSession {
     this.on.speaking('ai');
 
     const seq = ++this.#seq;
-    this.#activeResponse = {
-      id: response?.id,
-      seq,
-      rec: this.#aiRec,
-      startMs: this.#aiRec?.nowMs() ?? 0,
-      text: '',
-    };
+    this.#activeResponse = { id: response?.id, seq, text: '' };
+    this.#speakingSeq = seq;
+    this.#turnAudio = this.#saveAiAudio ? { blobs: [], durationMs: 0 } : null;
     this.on.message({ seq, role: 'assistant', text: '', pending: true });
   }
 
@@ -710,26 +782,33 @@ export class LessonSession {
 
     const entry = this.#activeResponse;
     this.#activeResponse = null;
-    this.on.speaking(null);
     if (!entry) {
       this.#unlockPtt();
       return;
     }
 
-    // Nut mo lai trong #finalizeAssistantAudio, khi audio that su het tieng.
-    // Day chi la tran an toan phong khi viec do im lang khong chot duoc.
-    if (this.#unlockTimer) clearTimeout(this.#unlockTimer);
-    this.#unlockTimer = setTimeout(() => this.#unlockPtt(), this.#scaled(PTT_UNLOCK_FAILSAFE_MS));
-
     if (!entry.text) entry.text = extractTranscript(response) ?? '';
     this.on.messageUpdate(entry.seq, entry.text, { pending: false });
+
+    // `response.done` chi bao model sinh xong CHU. Tieng noi thi con dang lan
+    // luot doc va phat — nut micro mo lai o #onSpeechDone, khi hang doi canh.
+    //
+    // Duong cu phai DOAN moc do bang cach do im lang tren track WebRTC, vi
+    // audio van dang bay ve. Gio thi biet chinh xac.
+    this.#speech.end();
 
     await api
       .saveMessage(this.sessionId, { seq: entry.seq, role: 'assistant', text: entry.text })
       .catch((e) => console.warn('[save] message ai:', e.message));
 
-    this.#finalizeAssistantAudio(entry);
     this.#requestHints();
+  }
+
+  /** Hang doi doc da canh: AI that su noi xong. */
+  #onSpeechDone(): void {
+    this.on.speaking(null);
+    this.#unlockPtt();
+    this.#flushTurnAudio();
   }
 
   #onToolCall(event: RealtimeEvent): void {
@@ -737,8 +816,13 @@ export class LessonSession {
     try {
       args = JSON.parse(event.arguments || '{}');
     } catch {
+      console.warn('[tool]', event.name, 'arguments khong phai JSON:', event.arguments);
       return;
     }
+
+    // `end_lesson` khong cham server va khong ghi DB, nen day la dau vet duy
+    // nhat cho thay model da goi tool nao voi tham so gi.
+    console.info('[tool]', event.name, args);
 
     if (event.name === 'mark_objective' && args.objective_id && args.status) {
       const record: ProgressRecord = {
@@ -755,7 +839,17 @@ export class LessonSession {
     }
 
     if (event.name === 'end_lesson') {
-      this.on.canFinish({ reason: args.reason, note: args.closing_note });
+      // Ba ly do, chi mot dang chuc mung: chuc mung nguoi dang duoi
+      // (learner_struggling) la phan tac dung.
+      //
+      // Va van phai doi chieu voi checklist cua client — model *de xuat*, client
+      // moi chot. Model quen goi mark_objective mot muc tieu la se ra the ghi
+      // "hoan thanh bai hoc" ngay tren dong "Du 2/3 muc tieu".
+      this.#offerFinish({
+        reason: args.reason,
+        note: args.closing_note,
+        completed: args.reason === 'objectives_complete' && this.#finishConditionsMet(),
+      });
     }
 
     // Tra ket qua tool vao conversation nhung khong goi response.create:
@@ -773,17 +867,42 @@ export class LessonSession {
   // -------------------------------------------------------------- diem dung
 
   /** Diem dung: du muc tieu bat buoc VA du so luot toi thieu. */
-  #maybeOfferFinish() {
-    const required = this.lesson.objectives.filter((o) => o.required);
-    const allDone = required.every((o) => this.#progress.get(o.id)?.status === 'done');
-    const enoughTurns = this.#seq >= this.lesson.minTurns;
+  #finishConditionsMet(): boolean {
+    const { done, total } = this.#requiredCount();
+    return done === total && this.#seq >= this.lesson.minTurns;
+  }
 
-    if (allDone && enoughTurns) {
-      this.on.canFinish({
-        reason: 'objectives_complete',
-        note: 'Bạn đã hoàn thành tất cả mục tiêu của bài. Có thể kết thúc bất cứ lúc nào.',
-      });
-    }
+  #maybeOfferFinish() {
+    if (!this.#finishConditionsMet()) return;
+    this.#offerFinish({
+      reason: 'objectives_complete',
+      note: 'Bạn đã hoàn thành tất cả mục tiêu của bài. Có thể kết thúc bất cứ lúc nào.',
+      completed: true,
+    });
+  }
+
+  #requiredCount(): { done: number; total: number } {
+    const required = this.lesson.objectives.filter((o) => o.required);
+    return {
+      done: required.filter((o) => this.#progress.get(o.id)?.status === 'done').length,
+      total: required.length,
+    };
+  }
+
+  /**
+   * Cua duy nhat bao "co the ket thuc" ra ngoai.
+   *
+   * `#maybeOfferFinish()` chay sau MOI lan `mark_objective`, nen mot khi da du
+   * dieu kien thi no bao lai o moi luot tiep theo. Khong chot lai thi the chuc
+   * mung se dung lai lien tuc — truoc day khong ai thay vi no chi doi mot dong
+   * banner.
+   */
+  #offerFinish(info: { reason?: string; note?: string; completed: boolean }): void {
+    const completed = info.completed && !this.#congratulated;
+    if (completed) this.#congratulated = true;
+
+    const { done, total } = this.#requiredCount();
+    this.on.canFinish({ ...info, completed, doneCount: done, totalCount: total });
   }
 
   progressList() {
@@ -852,53 +971,53 @@ export class LessonSession {
   // ----------------------------------------------------------------- audio
 
   /**
-   * `response.done` chi bao model sinh xong text/audio — audio van dang phat not
-   * qua WebRTC. Doi den khi im lang moi cat, neu khong se hut mat duoi cau.
+   * Gom mp3 cua tung khuc lai. Chi chay khi nguoi hoc bat luu audio cua AI.
+   *
+   * `durationMs` la uoc luong tu moc viseme cuoi cung — Polly khong tra do dai
+   * audio, va giai ma mp3 chi de biet con so nay thi khong dang. No chi dung
+   * de hien do dai o man tong ket.
    */
-  async #finalizeAssistantAudio(entry: ActiveResponse): Promise<void> {
-    const rec = entry.rec;
-    if (!rec) {
-      this.#unlockPtt();
-      return;
-    }
+  #collectTurnAudio(blob: Blob, durationMs: number): void {
+    if (!this.#turnAudio) return;
+    this.#turnAudio.blobs.push(blob);
+    this.#turnAudio.durationMs += durationMs;
+  }
 
-    const deadline = performance.now() + this.#scaled(SILENCE_WATCH_MS);
-    let endMs = null;
+  /**
+   * Noi cac khuc thanh mot file roi day len, ung voi dung mot message.
+   *
+   * MP3 la dong frame lien tiep nen noi thang byte la phat duoc — khong phai
+   * giai ma roi ma hoa lai chi de dan hai doan vao nhau.
+   */
+  #flushTurnAudio(): void {
+    const turn = this.#turnAudio;
+    const seq = this.#speakingSeq;
+    this.#turnAudio = null;
+    this.#speakingSeq = null;
 
-    while (performance.now() < deadline) {
-      await sleep(300);
-      const last = rec.lastVoiceMs(entry.startMs, rec.nowMs());
-      if (last !== null && rec.nowMs() - last > 700) {
-        endMs = last + 200;
-        break;
-      }
-    }
-    entry.endMs = endMs ?? rec.nowMs();
-
-    // AI da that su ngung tieng — den day moi tra nut lai cho user.
-    this.#unlockPtt();
-
-    const firstVoice = rec.firstVoiceMs(entry.startMs, entry.endMs);
-    if (firstVoice !== null) entry.startMs = Math.max(entry.startMs, firstVoice - 150);
-
-    this.#cutAndUpload(entry, 'assistant');
+    if (!turn?.blobs.length || seq === null) return;
+    const blob = new Blob(turn.blobs, { type: 'audio/mpeg' });
+    void this.#queueUpload(seq, 'assistant', turn.durationMs, blob);
   }
 
   /** Cat doan audio cua mot message va day len ngay, khong doi cuoi buoi. */
-  async #cutAndUpload(
-    entry: { seq: number; rec: TrackRecorder | null; startMs: number; endMs?: number | null },
-    role: Role
-  ): Promise<void> {
+  async #cutAndUpload(entry: PendingTurn, role: Role): Promise<void> {
     // Khong co endMs thi chua chot duoc doan — bo qua con hon cat bua.
     if (entry.endMs == null) return;
-    const blob = entry.rec?.sliceToWav(entry.startMs, entry.endMs);
+    const blob = entry.rec.sliceToWav(entry.startMs, entry.endMs);
     if (!blob) return;
-    const durationMs = entry.endMs - entry.startMs;
+    await this.#queueUpload(entry.seq, role, entry.endMs - entry.startMs, blob);
+  }
 
-    // Ghi vao hang doi TRUOC khi await: stop() phai doi duoc ca nhung doan vua
-    // moi bat dau day.
-    const task = this.#upload(entry.seq, role, durationMs, blob).catch((err) => {
-      console.warn(`[audio] khong luu duoc doan seq=${entry.seq}:`, errorMessage(err));
+  /**
+   * Dua mot doan vao hang doi day len.
+   *
+   * Ghi vao `#pendingUploads` TRUOC khi await: `stop()` phai doi duoc ca nhung
+   * doan vua moi bat dau day, khong thi dong tab la mat.
+   */
+  async #queueUpload(seq: number, role: Role, durationMs: number, blob: Blob): Promise<void> {
+    const task = this.#upload(seq, role, durationMs, blob).catch((err) => {
+      console.warn(`[audio] khong luu duoc doan seq=${seq}:`, errorMessage(err));
     });
     this.#pendingUploads.add(task);
     await task.finally(() => this.#pendingUploads.delete(task));
@@ -919,7 +1038,10 @@ export class LessonSession {
       return;
     }
 
-    const key = `${grant.keyPrefix}${String(seq).padStart(3, '0')}-${role}.wav`;
+    // Duoi file phai khop het voi `audioKey` ben server, khong thi `verifyKey`
+    // tu choi: WAV cho doan ghi cua nguoi hoc, MP3 cho cau Polly doc.
+    const ext = role === 'assistant' ? 'mp3' : 'wav';
+    const key = `${grant.keyPrefix}${String(seq).padStart(3, '0')}-${role}.${ext}`;
     await retry(() => putAudioToS3(grant, key, blob));
 
     // Chi bao len UI sau khi server da gan xong: bao som thi nut nghe lai tro

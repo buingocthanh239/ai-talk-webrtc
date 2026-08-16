@@ -1,6 +1,7 @@
 import type {
   Lesson,
   Message,
+  PollyGrant,
   ProgressRecord,
   Quota,
   Role,
@@ -10,6 +11,7 @@ import type {
   TokenResponse,
   UploadGrant,
 } from '../../shared/types.ts';
+import type { DrillResponse } from '../../shared/viseme.ts';
 
 /**
  * Loi HTTP giu nguyen status va payload.
@@ -57,6 +59,12 @@ export const api = {
 
   listSessions: () => request<SessionListItem[]>('/api/sessions'),
 
+  /**
+   * Lan goi dau cho mot bai co the mat vai giay: server phai goi Polly cho
+   * tung cau. Cac lan sau tra tu cache.
+   */
+  getDrill: (lessonId: string) => request<DrillResponse>(`/api/lessons/${lessonId}/drill`),
+
   startSession: (lessonId: string) =>
     request<{ sessionId: string; lesson: Lesson }>('/api/sessions', json('POST', { lessonId })),
 
@@ -64,6 +72,13 @@ export const api = {
 
   getToken: (id: string, resume = false) =>
     request<TokenResponse>(`/api/sessions/${id}/token`, json('POST', { resume })),
+
+  /**
+   * Xin lai quyen goi Polly giua buoi hoc — credential het han, hoac doi mang
+   * nen lech IP so voi luc ky.
+   */
+  getPollyGrant: (id: string) =>
+    request<{ pollyGrant: PollyGrant | null }>(`/api/sessions/${id}/polly`, json('POST')),
 
   getQuota: () => request<Quota>('/api/quota'),
 
@@ -90,7 +105,7 @@ export const api = {
       {
         method: 'POST',
         headers: {
-          'Content-Type': 'audio/wav',
+          'Content-Type': blob.type || 'audio/wav',
           'X-Role': role,
           'X-Duration-Ms': String(Math.round(durationMs)),
         },
@@ -123,7 +138,11 @@ export const api = {
 export async function putAudioToS3(grant: UploadGrant, key: string, blob: Blob): Promise<void> {
   const form = new FormData();
   form.append('key', key);
-  for (const [name, value] of Object.entries(grant.fields)) form.append(name, value);
+  for (const [name, value] of Object.entries(grant.fields)) {
+    // Policy ky theo `starts-with $Content-Type: audio/`, nen mot grant phu
+    // duoc ca WAV cua nguoi hoc lan MP3 tu Polly. Lay kieu that cua blob.
+    form.append(name, name === 'Content-Type' ? blob.type || value : value);
+  }
   form.append('file', blob);
 
   // Khong tu dat Content-Type: trinh duyet phai tu sinh boundary cua multipart.

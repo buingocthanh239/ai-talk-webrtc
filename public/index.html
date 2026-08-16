@@ -27,19 +27,123 @@
         <div id="lesson-list" class="card-grid"></div>
       </section>
 
+      <!-- Tach khoi hoi thoai co y: trong luc noi chuyen khong ai nhin kip
+           khau hinh, cho hoc duoc la luc dung lai xem cham. -->
+      <section id="drill-entry" class="hidden">
+        <h2>Luyện khẩu hình</h2>
+        <p class="meta">
+          Xem chậm cách miệng chuyển động cho từng từ và câu mẫu của bài, rồi nhại lại.
+        </p>
+        <div id="drill-lessons" class="chip-row"></div>
+      </section>
+
       <section>
         <h2>Buổi học đã lưu</h2>
         <div id="history-list" class="history"></div>
       </section>
     </main>
 
+    <!-- ────────────────────────────── DRILL ───────────────────────────── -->
+    <main id="screen-drill" class="screen hidden">
+      <button id="btn-drill-home" class="link-btn">← Về trang chủ</button>
+      <h2 id="drill-title">Luyện khẩu hình</h2>
+      <p id="drill-status" class="meta"></p>
+
+      <div class="drill-layout">
+        <aside class="side">
+          <div id="drill-list" class="drill-list"></div>
+        </aside>
+
+        <section class="drill-stage">
+          <div class="drill-viewer">
+            <canvas id="drill-canvas" class="drill-canvas"></canvas>
+            <p id="drill-avatar-note" class="meta"></p>
+            <div id="drill-bars" class="viseme-bars"></div>
+          </div>
+
+          <div class="drill-dock">
+            <div id="drill-phrase" class="drill-phrase-current"></div>
+            <div id="drill-hint" class="drill-hint"></div>
+
+            <input id="drill-scrub" type="range" min="0" max="1000" value="0" step="1" />
+
+            <div class="drill-controls">
+              <button id="drill-play" class="primary-btn">▶ Phát lại</button>
+              <span class="meta">Tốc độ</span>
+              <div id="drill-rates" class="chip-row"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <audio id="drill-audio" preload="auto"></audio>
+    </main>
+
     <!-- ────────────────────────────── LIVE ────────────────────────────── -->
     <main id="screen-live" class="screen hidden">
       <div id="status-banner" class="banner hidden"></div>
 
+      <!-- Loi moi bam Ket thuc, khong phai thong bao thoang qua: no o lai cho
+           toi khi nguoi hoc bam hoac dong. Khong chan man hinh vi luc no bat
+           thi AI van dang noi not va nguoi hoc van noi tiep duoc. -->
+      <div id="congrats" class="congrats hidden" role="status" aria-live="polite">
+        <button id="congrats-close" class="congrats-close" aria-label="Đóng">×</button>
+        <div class="congrats-icon">🎉</div>
+        <strong class="congrats-title">Chúc mừng!</strong>
+        <p class="congrats-body">
+          Bạn đã hoàn thành bài học.
+          <span id="congrats-count"></span>
+        </p>
+        <button id="congrats-finish" class="primary-btn small">Kết thúc để nhận đánh giá</button>
+      </div>
+
       <div class="live-layout">
         <aside class="side">
           <button id="btn-quit" class="link-btn">← Thoát</button>
+
+          <!-- Avatar nhep mom theo viseme cua Polly. An cho toi khi bat tay
+               xong: chua co ket noi thi chua biet co cau hinh avatar khong. -->
+          <div id="talk-avatar" class="talk-avatar hidden">
+            <canvas id="talk-canvas" class="talk-canvas"></canvas>
+            <p id="talk-avatar-note" class="meta"></p>
+          </div>
+
+          <details id="voice-panel" class="panel">
+            <summary class="panel-head">
+              <div class="panel-head-text">
+                <h2>Giọng đọc</h2>
+                <div class="meta">Amazon Polly</div>
+              </div>
+              <span class="panel-caret" aria-hidden="true">▾</span>
+            </summary>
+
+            <label class="field" for="voice-select">
+              <span>Giọng</span>
+              <select id="voice-select"></select>
+            </label>
+
+            <label class="field" for="engine-select">
+              <span>Engine</span>
+              <select id="engine-select">
+                <option value="neural">neural</option>
+                <option value="standard">standard</option>
+                <option value="long-form">long-form</option>
+              </select>
+            </label>
+            <p class="meta">
+              Không có <code>generative</code>: engine đó không trả speech marks nên
+              không dựng được khẩu hình.
+            </p>
+
+            <label class="toggle" for="save-audio">
+              <input id="save-audio" type="checkbox" />
+              <span>Lưu giọng AI để nghe lại</span>
+            </label>
+            <p class="meta">
+              Tắt: màn tổng kết đọc lại bằng Polly — tốn tiền mỗi lần bấm nghe, đổi lại
+              có luôn khẩu hình. Bật: lưu mp3, nghe lại không tốn thêm.
+            </p>
+          </details>
 
           <!-- Tren dien thoai panel nay gap lai (main.ts dong san) de nhuong
                man hinh cho transcript va nut giu-de-noi. -->
@@ -91,17 +195,11 @@
                 <span class="dot"></span><span id="mic-label">Đang kết nối…</span>
               </div>
               <span id="quota-clock" class="quota-clock hidden"></span>
+              <!-- Khong con `disabled`: toc do gio la playbackRate cua the
+                   <audio> nen doi duoc ngay ca giua chung mot cau. -->
               <label class="speed-control" for="speed-range">
                 <span class="speed-label">Tốc độ AI</span>
-                <input
-                  id="speed-range"
-                  type="range"
-                  min="0.25"
-                  max="1.5"
-                  step="0.05"
-                  value="1"
-                  disabled
-                />
+                <input id="speed-range" type="range" min="0.25" max="1.5" step="0.05" value="1" />
                 <output id="speed-value" class="speed-value">1.0×</output>
               </label>
               <button id="btn-hint" class="ghost-btn">💡 Gợi ý</button>

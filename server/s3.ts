@@ -60,7 +60,8 @@ export function s3ConfigFromEnv(env = process.env): S3Config | null {
 const hmac = (key: Buffer | string, data: string): Buffer =>
   createHmac('sha256', key).update(data, 'utf8').digest();
 
-const sha256Hex = (data: string): string =>
+/** Export vi `polly.ts` ky cung mot kieu SigV4, chi khac `service`. */
+export const sha256Hex = (data: string): string =>
   createHash('sha256').update(data, 'utf8').digest('hex');
 
 /** kSigning = HMAC(HMAC(HMAC(HMAC("AWS4"+secret, date), region), service), "aws4_request") */
@@ -90,7 +91,7 @@ const encodeRfc3986 = (s: string): string =>
 const encodeKeyPath = (key: string): string => key.split('/').map(encodeRfc3986).join('/');
 
 /** `20130524T000000Z` va `20130524` */
-function stamps(at: number): { amzDate: string; date: string } {
+export function stamps(at: number): { amzDate: string; date: string } {
   const amzDate = new Date(at).toISOString().replace(/[:-]|\.\d{3}/g, '');
   return { amzDate, date: amzDate.slice(0, 8) };
 }
@@ -181,6 +182,15 @@ export interface PostPolicyOptions {
   /** Client duoc ghi bat cu key nao bat dau bang chuoi nay, khong ra ngoai. */
   keyPrefix: string;
   contentType: string;
+  /**
+   * Co gia tri thi policy dung `starts-with` thay vi doi chieu tuyet doi, va
+   * client duoc phep de len `Content-Type` mien la con trong tien to nay.
+   *
+   * Can vi mot buoi hoc gio co hai dinh dang: WAV cho doan ghi cua nguoi hoc,
+   * MP3 cho cau AI doc bang Polly. Mot chu ky van phai phu ca hai — ky rieng
+   * cho tung dinh dang thi mat luon cai loi cua POST policy.
+   */
+  contentTypePrefix?: string;
   minBytes: number;
   maxBytes: number;
   expiresIn: number;
@@ -226,7 +236,9 @@ export function presignPost(
     conditions: [
       { bucket: cfg.bucket },
       ['starts-with', '$key', opts.keyPrefix],
-      { 'Content-Type': opts.contentType },
+      opts.contentTypePrefix
+        ? ['starts-with', '$Content-Type', opts.contentTypePrefix]
+        : { 'Content-Type': opts.contentType },
       ['content-length-range', opts.minBytes, opts.maxBytes],
       { 'x-amz-algorithm': ALGORITHM },
       { 'x-amz-credential': credential },
