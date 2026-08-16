@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import type { Lesson, ProgressRecord, Quota } from '../shared/types.ts';
+import { clampSpeed } from '../shared/speed.ts';
 
 import * as db from './db.ts';
 import { AUDIO_DIR } from './db.ts';
@@ -226,7 +227,13 @@ async function mintClientSecret({
           // tha nut. Bat VAD lai la AI se tu noi khi nghe thay tieng vong loa.
           turn_detection: null,
         },
-        output: { voice: process.env.REALTIME_VOICE || 'marin' },
+        output: {
+          voice: process.env.REALTIME_VOICE || 'marin',
+          // Mac dinh cua bai hoc. Nguoi hoc de len bang session.update giua
+          // cac luot — API chi cho doi speed giua cac luot, khong doi duoc
+          // giua chung mot cau dang noi.
+          speed: clampSpeed(lesson.speed, clampSpeed(process.env.REALTIME_SPEED)),
+        },
       },
       tools: buildTools(lesson),
       tool_choice: 'auto',

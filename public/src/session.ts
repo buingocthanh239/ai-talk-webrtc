@@ -13,6 +13,7 @@ import type {
   SeedItem,
   UploadGrant,
 } from '../../shared/types.ts';
+import { clampSpeed } from '../../shared/speed.ts';
 
 /** Trang thai nut push-to-talk. Chi 'ready' moi cho bat dau noi. */
 export type PttState = 'locked' | 'ready' | 'recording' | 'thinking' | 'ai';
@@ -59,8 +60,19 @@ const BACKOFF_MS = [800, 2000, 4000, 8000, 15000];
 const PTT_TAIL_MS = 300;
 /** Doan ngan hon nguong nay coi nhu bam nham — khong gui. */
 const PTT_MIN_MS = 300;
-/** Tran an toan: neu khong chot duoc luc AI ngung tieng thi van mo lai nut. */
+/**
+ * Tran an toan: neu khong chot duoc luc AI ngung tieng thi van mo lai nut.
+ *
+ * Hai hang so duoi deu do bang thoi gian AI noi, nen phai chia cho `speed`:
+ * o 0.5x mot cau 10 giay keo thanh 20 giay. Khong co giai thi tran 8s se mo
+ * nut ngay giua luc AI dang noi, va vong do im lang het han truoc khi AI noi
+ * xong — doan WAV bi cat cut, cham phat am sai theo. Loi nay chi xuat hien o
+ * toc do cham, tuc la dung nhom nguoi hoc can tinh nang nay nhat.
+ */
 const PTT_UNLOCK_FAILSAFE_MS = 8000;
+
+/** Tran thoi gian do im lang sau khi response.done — audio con phat not. */
+const SILENCE_WATCH_MS = 12000;
 
 /** Lich thu lai khi day audio hong. Ngan hon BACKOFF_MS: mat mot doan audio
  * khong lam hong buoi hoc, khong dang giu micro cua user lai 30 giay. */
@@ -128,6 +140,11 @@ export class LessonSession {
   #stopped = false;
   #progress = new Map<string, ProgressRecord>();
 
+  /** Toc do noi cua AI. Bat dau tu mac dinh cua bai hoc. */
+  #speed: number;
+  /** Doi speed luc AI dang noi thi hoan lai — API chi cho doi giua cac luot. */
+  #pendingSpeed: number | null = null;
+
   /** Quyen ghi thang len S3. null = server dang luu audio tren dia. */
   #uploadGrant: UploadGrant | null = null;
   /** Cac doan dang cat/day. stop() phai doi het truoc khi tha micro. */
@@ -149,18 +166,57 @@ export class LessonSession {
     audioElement,
     handlers,
     startSeq = 0,
+    speed,
   }: {
     sessionId: string;
     lesson: Lesson;
     audioElement: HTMLAudioElement;
     handlers: SessionHandlers;
     startSeq?: number;
+    speed?: number;
   }) {
     this.sessionId = sessionId;
     this.lesson = lesson;
     this.audioElement = audioElement;
     this.on = handlers;
     this.#seq = startSeq;
+    // Nguoi hoc da tung chinh thi dung so do, chua thi lay mac dinh cua bai.
+    this.#speed = clampSpeed(speed ?? lesson.speed);
+  }
+
+  // -------------------------------------------------------- toc do AI noi
+
+  get speed(): number {
+    return this.#speed;
+  }
+
+  /**
+   * Doi toc do noi cua AI.
+   *
+   * Realtime API chi cho doi speed GIUA cac luot, khong doi duoc giua chung
+   * mot cau dang noi. Nen goi luc AI dang noi thi giu lai, ap dung ngay khi
+   * nut push-to-talk mo lai.
+   *
+   * Tra ve gia tri that su duoc dat (da chan trong 0.25–1.5).
+   */
+  setSpeed(value: number): number {
+    this.#speed = clampSpeed(value, this.#speed);
+    if (this.#pttState === 'ready') this.#applySpeed();
+    else this.#pendingSpeed = this.#speed;
+    return this.#speed;
+  }
+
+  /** Gian mot moc thoi gian theo toc do noi hien tai. */
+  #scaled(ms: number): number {
+    return Math.round(ms / this.#speed);
+  }
+
+  #applySpeed(): void {
+    this.#pendingSpeed = null;
+    this.#conn?.send({
+      type: 'session.update',
+      session: { type: 'realtime', audio: { output: { speed: this.#speed } } },
+    });
   }
 
   // ------------------------------------------------------------- han muc
@@ -273,6 +329,11 @@ export class LessonSession {
     // WebRTC (chi phat ra khoang lang) nen bat/tat khong phai thuong luong
     // lai SDP — re hon nhieu so voi them/bot track.
     this.#conn.setMicEnabled(false);
+
+    // Token mang mac dinh cua bai hoc; neu nguoi hoc da chinh khac thi day la
+    // luc dat lai. Gui vo dieu kien cho don gian — chua co luot nao chay nen
+    // chac chan dang o "giua cac luot", va push-to-talk thi user noi truoc.
+    this.#applySpeed();
 
     await this.#registerCall();
 
@@ -458,6 +519,8 @@ export class LessonSession {
   #setPttState(state: PttState): void {
     if (this.#pttState === state) return;
     this.#pttState = state;
+    // Vua het luot cua AI — day la cua so duy nhat doi speed duoc.
+    if (state === 'ready' && this.#pendingSpeed !== null) this.#applySpeed();
     this.on.pttState?.(state);
   }
 
@@ -656,7 +719,7 @@ export class LessonSession {
     // Nut mo lai trong #finalizeAssistantAudio, khi audio that su het tieng.
     // Day chi la tran an toan phong khi viec do im lang khong chot duoc.
     if (this.#unlockTimer) clearTimeout(this.#unlockTimer);
-    this.#unlockTimer = setTimeout(() => this.#unlockPtt(), PTT_UNLOCK_FAILSAFE_MS);
+    this.#unlockTimer = setTimeout(() => this.#unlockPtt(), this.#scaled(PTT_UNLOCK_FAILSAFE_MS));
 
     if (!entry.text) entry.text = extractTranscript(response) ?? '';
     this.on.messageUpdate(entry.seq, entry.text, { pending: false });
@@ -799,7 +862,7 @@ export class LessonSession {
       return;
     }
 
-    const deadline = performance.now() + 12000;
+    const deadline = performance.now() + this.#scaled(SILENCE_WATCH_MS);
     let endMs = null;
 
     while (performance.now() < deadline) {

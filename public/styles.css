@@ -550,6 +550,35 @@ button {
   margin-left: auto;
 }
 
+.speed-control {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.speed-control input[type='range'] {
+  width: 90px;
+  accent-color: var(--accent, currentColor);
+  cursor: pointer;
+}
+/* Khoa luc AI dang noi — API chi doi duoc toc do giua cac luot. */
+.speed-control input[type='range']:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.speed-value {
+  min-width: 2.6rem;          /* giu cho san de so khong nhay khi keo */
+  font-variant-numeric: tabular-nums;
+}
+
+/* Man hinh hep: nhan chu "Toc do AI" nhuong cho, chi con thanh keo va so. */
+@media (max-width: 560px) {
+  .speed-control .speed-label {
+    display: none;
+  }
+}
+
 .mic-state {
   display: flex;
   align-items: center;

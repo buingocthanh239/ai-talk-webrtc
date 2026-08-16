@@ -100,7 +100,8 @@ sequenceDiagram
     App->>BE: POST /api/sessions/:id/token {resume:false}
     Note over BE: Layer 1 chặn hạn mức:<br/>quotaFor(userId).remainingMs <= 0<br/>→ 429 {code:"quota_exhausted"}
     BE->>BE: buildInstructions(lesson, progress)
-    BE->>OAI: POST /v1/realtime/client_secrets<br/>{instructions, tools, whisper-1,<br/> turn_detection:null, voice}
+    BE->>OAI: POST /v1/realtime/client_secrets<br/>{instructions, tools, whisper-1,<br/> turn_detection:null, voice, speed}
+    Note over BE: speed = lesson.speed (0.25–1.5).<br/>Người học đè lên bằng session.update<br/>giữa các lượt — API không cho đổi<br/>giữa chừng một câu đang nói.
     OAI-->>BE: {value, expires_at}
     BE-->>App: {clientSecret, model, seedItems[], progress[], uploadGrant}
     Note over BE,App: uploadGrant = presigned POST policy cho CẢ buổi:<br/>starts-with $key → audio/&lt;sessionId&gt;/, 45..5MB, hạn 2h.<br/>Cấp lại mỗi lần xin token nên reconnect luôn có bản còn hạn.<br/>null = server đang lưu audio trên đĩa.

@@ -6,6 +6,7 @@
   "scenario": "You are Mia, a friendly barista at a small coffee shop in Melbourne. The learner is a customer who just walked in.",
   "allowVietnameseHint": true,
   "minTurns": 6,
+  "speed": 0.85,
   "objectives": [
     {
       "id": "o1",

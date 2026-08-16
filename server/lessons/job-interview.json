@@ -6,6 +6,7 @@
   "scenario": "You are Alex, a hiring manager at a small software company. You are interviewing the learner for a junior developer role. Keep it warm but professional.",
   "allowVietnameseHint": false,
   "minTurns": 8,
+  "speed": 0.95,
   "objectives": [
     {
       "id": "o1",

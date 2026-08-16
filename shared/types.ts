@@ -31,6 +31,11 @@ export interface Lesson {
   scenario: string;
   allowVietnameseHint: boolean;
   minTurns: number;
+  /**
+   * Toc do noi mac dinh cua AI cho bai nay (0.25–1.5). Bai trinh do thap de
+   * cham lai. Nguoi hoc de len duoc bang slider; de trong = 1.0.
+   */
+  speed?: number;
   objectives: Objective[];
   vocabulary: Vocabulary[];
   grammar: Grammar[];

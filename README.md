@@ -17,7 +17,8 @@ Yêu cầu Node >= 22.5 (đang test trên v24). Mở bằng Chrome/Edge/Safari �
 
 ### 1. Truyền thông tin bài học
 
-Bài học là JSON trong `server/lessons/*.json`: mục tiêu, từ vựng, ngữ pháp, kịch bản, `minTurns`.
+Bài học là JSON trong `server/lessons/*.json`: mục tiêu, từ vựng, ngữ pháp, kịch bản, `minTurns`,
+`speed`.
 `server/prompt.js` rap thành `instructions` và **nhét thẳng vào ephemeral token** lúc mint
 (`server/index.js` → `mintClientSecret`). Browser chỉ nhận về một chuỗi secret ngắn hạn, nên
 không sửa được luật bài học hay luật chấm điểm. API key thật không bao giờ rời server.
@@ -102,6 +103,25 @@ Khi resume **không replay toàn bộ lịch sử** (tốn token, và session re
 Audio của message cũ không nạp lại được vào session mới — chỉ nạp text. Không sao, audio cũ vẫn nằm
 nguyên trong DB để phát lại.
 
+## Tốc độ nói của AI
+
+Bài học đặt mặc định (`"speed": 0.85` trong lesson JSON), người học kéo slider đè lên được; lựa chọn
+được nhớ trong `localStorage` và áp dụng cho mọi bài sau đó.
+
+Realtime API **chỉ cho đổi tốc độ giữa các lượt**, không đổi giữa chừng một câu đang nói — nên
+slider bị khoá lúc `pttState !== 'ready'`, và thay đổi lúc AI đang nói sẽ được giữ lại rồi áp dụng
+ngay khi nút push-to-talk mở lại (`session.ts` → `#pendingSpeed`).
+
+Hai điều dễ hiểu nhầm:
+
+- **Đây là hậu kỳ trên audio đã sinh, không phải model nói chậm lại.** Nó không làm AI chọn từ dễ
+  hơn hay ngắt nghỉ nhiều hơn — muốn vậy thì phải viết vào `instructions` (`server/prompt.ts`).
+  Nói chậm mà câu vẫn phức tạp thì gần như không giúp được người mới học.
+- **Các mốc thời gian đo bằng thời gian AI nói phải chia cho `speed`.** Ở 0.5x, một câu 10 giây kéo
+  thành 20 giây; để nguyên thì trần mở nút (8s) sẽ trả nút lại giữa lúc AI đang nói, và vòng dò im
+  lặng (12s) hết hạn trước khi AI nói xong làm đoạn WAV bị cắt cụt — chấm phát âm sai theo. Xem
+  `#scaled()` trong `session.ts`.
+
 ## Lớp gợi ý
 
 Hai kênh cho hai tình huống khác nhau:
@@ -137,6 +157,7 @@ data/           app.db + audio/ (tự tạo, đã gitignore)
 | `OPENAI_API_KEY` | — | bắt buộc |
 | `REALTIME_MODEL` | `gpt-realtime` | model hội thoại |
 | `REALTIME_VOICE` | `marin` | giọng AI |
+| `REALTIME_SPEED` | `1` | tốc độ nói, chỉ dùng khi bài học không đặt `speed` |
 | `GRADER_TEXT_MODEL` | `gpt-4o` | chấm grammar/vocab/mục tiêu |
 | `GRADER_AUDIO_MODEL` | `gpt-4o-audio-preview` | để trống = tắt chấm phát âm |
 | `AUDIO_STORE` | `disk` | `s3` = client đẩy thẳng lên bucket |

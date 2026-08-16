@@ -5,5 +5,9 @@
     // la bao loi ngay, thay vi lot vao bundle roi chet trong browser.
     "lib": ["ES2023", "DOM", "DOM.Iterable"]
   },
-  "include": ["public/src/**/*.ts", "shared/**/*.ts"]
+  "include": ["public/src/**/*.ts", "shared/**/*.ts"],
+  // File test chay bang node:test nen can type cua node — de tsconfig.server
+  // kiem chung. Khong loai ra thi chinh cai "khong co types: node" o tren se
+  // bao loi tren file test.
+  "exclude": ["**/*.test.ts"]
 }

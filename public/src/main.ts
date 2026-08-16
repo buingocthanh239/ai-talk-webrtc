@@ -11,6 +11,7 @@ import type {
   SessionDetail,
   Summary,
 } from '../../shared/types.ts';
+import { clampSpeed } from '../../shared/speed.ts';
 
 /**
  * Thieu mot phan tu trong index.html la loi lap trinh, khong phai tinh huong
@@ -325,6 +326,27 @@ function setPttUi(state: PttState): void {
   // Go chu va noi la hai duong vao cua cung mot luot, nen mo/khoa cung nhip.
   $<HTMLInputElement>('text-input').disabled = state !== 'ready';
   $<HTMLButtonElement>('btn-send').disabled = state !== 'ready';
+
+  // Realtime API chi doi duoc speed giua cac luot. Khoa slider luc AI dang
+  // noi de nguoi hoc khong keo roi tuong la khong an gi.
+  $<HTMLInputElement>('speed-range').disabled = state !== 'ready';
+}
+
+// ------------------------------------------------------------ toc do AI
+
+const SPEED_KEY = 'ai-learn:speed';
+
+/** Toc do nguoi hoc da chon lan truoc. null = chua tung chinh, dung mac dinh bai. */
+function storedSpeed(): number | null {
+  const raw = localStorage.getItem(SPEED_KEY);
+  if (raw === null) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? clampSpeed(n) : null;
+}
+
+function renderSpeed(value: number): void {
+  $<HTMLInputElement>('speed-range').value = String(value);
+  $('speed-value').textContent = `${value.toFixed(2).replace(/0$/, '')}×`;
 }
 
 function sendTyped(): void {
@@ -460,6 +482,7 @@ async function runSession({
     sessionId,
     lesson,
     startSeq,
+    speed: storedSpeed() ?? lesson.speed,
     audioElement: $<HTMLAudioElement>('ai-audio'),
     handlers: {
       status(state, detail) {
@@ -547,6 +570,8 @@ async function runSession({
     },
   });
 
+  renderSpeed(active.speed);
+
   try {
     await active.start({ resume });
   } catch (err) {
@@ -561,6 +586,20 @@ async function runSession({
 $<HTMLButtonElement>('btn-hint').onclick = (e) => {
   (e.currentTarget as HTMLButtonElement | null)?.blur();
   active?.requestVoiceHint();
+};
+
+$<HTMLInputElement>('speed-range').oninput = (e) => {
+  const input = e.currentTarget as HTMLInputElement;
+  // Nho gia tri ngay ca khi chua vao buoi hoc nao — lan sau mo bai la co san.
+  const applied = active ? active.setSpeed(Number(input.value)) : clampSpeed(input.value);
+  localStorage.setItem(SPEED_KEY, String(applied));
+  renderSpeed(applied);
+};
+
+// Tra focus ra ngoai de phim Space lai dieu khien nut giu-de-noi chu khong
+// keo slider.
+$<HTMLInputElement>('speed-range').onchange = (e) => {
+  (e.currentTarget as HTMLInputElement | null)?.blur();
 };
 
 $<HTMLButtonElement>('btn-finish').onclick = async () => {

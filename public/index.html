@@ -91,6 +91,19 @@
                 <span class="dot"></span><span id="mic-label">Đang kết nối…</span>
               </div>
               <span id="quota-clock" class="quota-clock hidden"></span>
+              <label class="speed-control" for="speed-range">
+                <span class="speed-label">Tốc độ AI</span>
+                <input
+                  id="speed-range"
+                  type="range"
+                  min="0.25"
+                  max="1.5"
+                  step="0.05"
+                  value="1"
+                  disabled
+                />
+                <output id="speed-value" class="speed-value">1.0×</output>
+              </label>
               <button id="btn-hint" class="ghost-btn">💡 Gợi ý</button>
               <button id="btn-finish" class="primary-btn" disabled>Kết thúc bài học</button>
             </div>
