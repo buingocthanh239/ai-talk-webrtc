@@ -11,7 +11,6 @@ import type {
   TokenResponse,
   UploadGrant,
 } from '../../shared/types.ts';
-import type { DrillResponse } from '../../shared/viseme.ts';
 
 /**
  * Loi HTTP giu nguyen status va payload.
@@ -58,12 +57,6 @@ export const api = {
   listLessons: () => request<Lesson[]>('/api/lessons'),
 
   listSessions: () => request<SessionListItem[]>('/api/sessions'),
-
-  /**
-   * Lan goi dau cho mot bai co the mat vai giay: server phai goi Polly cho
-   * tung cau. Cac lan sau tra tu cache.
-   */
-  getDrill: (lessonId: string) => request<DrillResponse>(`/api/lessons/${lessonId}/drill`),
 
   startSession: (lessonId: string) =>
     request<{ sessionId: string; lesson: Lesson }>('/api/sessions', json('POST', { lessonId })),

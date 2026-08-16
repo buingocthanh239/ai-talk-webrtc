@@ -27,57 +27,12 @@
         <div id="lesson-list" class="card-grid"></div>
       </section>
 
-      <!-- Tach khoi hoi thoai co y: trong luc noi chuyen khong ai nhin kip
-           khau hinh, cho hoc duoc la luc dung lai xem cham. -->
-      <section id="drill-entry" class="hidden">
-        <h2>Luyện khẩu hình</h2>
-        <p class="meta">
-          Xem chậm cách miệng chuyển động cho từng từ và câu mẫu của bài, rồi nhại lại.
-        </p>
-        <div id="drill-lessons" class="chip-row"></div>
-      </section>
-
       <section>
         <h2>Buổi học đã lưu</h2>
         <div id="history-list" class="history"></div>
       </section>
     </main>
 
-    <!-- ────────────────────────────── DRILL ───────────────────────────── -->
-    <main id="screen-drill" class="screen hidden">
-      <button id="btn-drill-home" class="link-btn">← Về trang chủ</button>
-      <h2 id="drill-title">Luyện khẩu hình</h2>
-      <p id="drill-status" class="meta"></p>
-
-      <div class="drill-layout">
-        <aside class="side">
-          <div id="drill-list" class="drill-list"></div>
-        </aside>
-
-        <section class="drill-stage">
-          <div class="drill-viewer">
-            <canvas id="drill-canvas" class="drill-canvas"></canvas>
-            <p id="drill-avatar-note" class="meta"></p>
-            <div id="drill-bars" class="viseme-bars"></div>
-          </div>
-
-          <div class="drill-dock">
-            <div id="drill-phrase" class="drill-phrase-current"></div>
-            <div id="drill-hint" class="drill-hint"></div>
-
-            <input id="drill-scrub" type="range" min="0" max="1000" value="0" step="1" />
-
-            <div class="drill-controls">
-              <button id="drill-play" class="primary-btn">▶ Phát lại</button>
-              <span class="meta">Tốc độ</span>
-              <div id="drill-rates" class="chip-row"></div>
-            </div>
-          </div>
-        </section>
-      </div>
-
-      <audio id="drill-audio" preload="auto"></audio>
-    </main>
 
     <!-- ────────────────────────────── LIVE ────────────────────────────── -->
     <main id="screen-live" class="screen hidden">
@@ -105,7 +60,16 @@
                xong: chua co ket noi thi chua biet co cau hinh avatar khong. -->
           <div id="talk-avatar" class="talk-avatar hidden">
             <canvas id="talk-canvas" class="talk-canvas"></canvas>
+            <p id="talk-hint" class="viseme-hint"></p>
             <p id="talk-avatar-note" class="meta"></p>
+
+            <!-- Thanh đo luôn chạy kể cả khi không có AVATAR_URL. Khi mồm
+                 avatar đứng im, đây là cách duy nhất phân biệt "dữ liệu không
+                 chạy" với "model thiếu morph target". -->
+            <details class="viseme-debug">
+              <summary>15 thanh đo viseme</summary>
+              <div id="talk-bars" class="viseme-bars"></div>
+            </details>
           </div>
 
           <details id="voice-panel" class="panel">

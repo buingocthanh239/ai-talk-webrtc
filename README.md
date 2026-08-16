@@ -5,8 +5,8 @@ Demo luồng học nói tiếng Anh thời gian thực bằng **OpenAI Realtime 
 **Backend zero dependency** — chỉ dùng core module của Node (`node:http`, `node:sqlite`, `node:crypto`).
 Ký SigV4 cho S3 và Polly, ký CloudFront đều viết tay, không kéo AWS SDK về.
 
-Client có đúng **một** runtime dependency: `three` cho avatar 3D ở màn luyện khẩu hình. Nó nằm ở
-chunk riêng, chỉ tải khi mở màn đó — `bundle.js` của phần hội thoại vẫn ~56KB.
+Client có đúng **một** runtime dependency: `three` cho avatar 3D nhép mồm theo lời AI. Nó nằm ở
+chunk riêng, chỉ tải khi có cấu hình avatar — `bundle.js` vẫn ~80KB.
 
 ## Chạy
 
@@ -70,13 +70,14 @@ Mỗi lỗi gắn `message_seq` nên ở màn tổng kết bấm vào lỗi là 
 
 ### 4. Lưu trữ & tái sử dụng
 
-**Ghi âm:** hai `AudioWorklet` chạy song song (mic + track của AI), ghi PCM 16kHz liên tục vào buffer
-(`public/js/recorder.js`). Không dùng `MediaRecorder.start()/stop()` theo từng lượt vì recorder khởi
-động chậm hơn tiếng nói ~100–200ms nên luôn cụt đầu câu. Việc cắt thành từng message làm sau, bằng
-timestamp lấy từ event realtime:
+**Ghi âm:** một `AudioWorklet` trên micro, ghi PCM 16kHz liên tục vào ring buffer
+(`public/src/recorder.ts`). Không dùng `MediaRecorder.start()/stop()` theo từng lượt vì recorder
+khởi động chậm hơn tiếng nói ~100–200ms nên luôn cụt đầu câu. Việc cắt thành từng message làm sau,
+bằng timestamp mốc lúc người học nhấn và thả nút giữ-để-nói.
 
-- User: `input_audio_buffer.speech_started` → `speech_stopped`
-- AI: `response.created` → dò im lặng sau `response.done` (audio còn đang phát nốt qua WebRTC)
+**Chỉ ghi tiếng của người học.** Câu của AI không được ghi: nó do Polly đọc từ text, mà text thì đã
+nằm trong DB — nghe lại thì đọc lại. Bật công tắc "Lưu giọng AI" thì mp3 của Polly được đẩy lên S3
+như một file bình thường.
 
 Cắt xong upload ngay từng đoạn, không đợi cuối buổi — crash giữa chừng vẫn còn dữ liệu.
 
@@ -140,52 +141,6 @@ khoá lúc AI đang nói và thay đổi bị xếp hàng chờ. Cả cơ chế 
 **Điều dễ hiểu nhầm: đây là hậu kỳ trên audio đã sinh, không phải model nói chậm lại.** Nó không
 làm AI chọn từ dễ hơn hay ngắt nghỉ nhiều hơn — muốn vậy thì phải viết vào `instructions`
 (`server/prompt.ts`). Nói chậm mà câu vẫn phức tạp thì gần như không giúp được người mới học.
-
-## Luyện khẩu hình (Amazon Polly + avatar 3D)
-
-Một màn riêng, **không dùng WebRTC và không tốn hạn mức gọi**: chọn một từ hoặc câu mẫu của bài,
-xem avatar 3D diễn khẩu hình, kéo chậm xuống 0.4× và tua về đúng âm vừa sai.
-
-Chi tiết luồng và các phương án đã loại: [`docs/lip-sync.md`](docs/lip-sync.md).
-
-**Hội thoại giờ cũng có khẩu hình** — xem mục dưới. Màn luyện vẫn giữ riêng vì nó là chỗ dừng lại,
-kéo chậm và tua đi tua lại; giữa hội thoại AI nói ~150 từ/phút thì không ai làm được việc đó.
-
-Text biết trước nên không phải đoán gì: Polly trả thẳng **speech marks** kèm mốc ms cho từng viseme.
-
-```
-lesson.vocabulary + objectives.examples
-  → Polly SynthesizeSpeech ×2  (mp3  +  speech marks)
-  → map 17 viseme Polly → 15 viseme Oculus
-  → cache data/audio/drill/<id>.{mp3,json}
-  → GET /api/lessons/:id/drill
-  → VisemePlayer bám audio.currentTime → morph target của avatar
-```
-
-Ba tầng tách rời để khi mồm avatar đứng im thì biết ngay lỗi ở đâu: Polly (dữ liệu) →
-`viseme-player.ts` (trọng số) → `avatar.ts` (vẽ). **15 thanh đo viseme luôn hiện cạnh avatar**,
-kể cả khi không cấu hình `AVATAR_URL` — đó là cách nhanh nhất để phân biệt "dữ liệu không chạy" với
-"model không có morph target".
-
-**Ba điều dễ vấp:**
-
-- **Engine `generative` KHÔNG hỗ trợ speech marks** (`ValidationException`). Chỉ `standard`,
-  `neural`, `long-form`. Server từ chối ngay lúc khởi động nếu đặt sai, kèm lý do.
-- **Phải gọi Polly hai lần.** Speech marks trả về *thay cho* audio chứ không kèm theo. Cùng
-  `Text` + `VoiceId` + `Engine` thì mốc thời gian khớp nhau. Hai request chạy song song.
-- **Avatar Ready Player Me phải tải kèm `?morphTargets=Oculus Visemes`.** Thiếu tham số đó thì
-  model vẫn hiện ra bình thường nhưng không có khẩu hình nào và không báo lỗi gì.
-
-**Chi phí:** hai bài hiện có cộng lại 527 ký tự → khoảng **$0.017 một lần** (neural, $16/1M, nhân
-đôi vì hai request). Cache vĩnh viễn theo `(giọng, engine, text)` nên chỉ sinh lại khi thêm bài
-hoặc đổi giọng. Free tier neural còn 1 triệu ký tự/tháng.
-
-**Giới hạn đã biết — rig không có lưỡi.** Với người Việt học tiếng Anh, những phân biệt khó nhất
-lại nằm ở lưỡi: θ/ð (lưỡi giữa hai răng), l vs n, âm r. Avatar RPM không có lưỡi, morph target gần
-như chỉ có môi và hàm. Polly cho dữ liệu đúng nhưng rig không diễn ra được. Bù tạm bằng
-`VISEME_HINT_VI` trong `shared/viseme.ts` — mỗi khẩu hình kèm một dòng tiếng Việt nói rõ vị trí
-lưỡi. Đây là bù đắp, không phải giải pháp; muốn giải thật thì phải đổi sang model có morph lưỡi,
-và việc đó không đụng tới tầng dữ liệu.
 
 ## Tiếng nói của AI trong hội thoại (Polly, gọi thẳng từ client)
 
@@ -253,9 +208,8 @@ server/
   grader.ts     chấm điểm sau buổi (text + audio)
   s3.ts         ký SigV4 + presigned POST/GET
   cdn.ts        ký CloudFront
-  polly.ts      ký SigV4 cho Polly (đường server, dùng cho drill)
+  polly.ts      đọc cấu hình Polly (giọng/engine/region) — KHÔNG gọi Polly
   sts.ts        AssumeRole → credential tạm cho client gọi Polly
-  drill.ts      dựng + cache bài luyện khẩu hình cho một lesson
   lessons/      bài học dạng JSON
 shared/         kiểu + logic dùng chung hai phía
   types.ts      hình dạng JSON qua ranh giới HTTP
@@ -263,24 +217,21 @@ shared/         kiểu + logic dùng chung hai phía
   chunk.ts      cắt dòng text của AI thành khúc gửi lên Polly
   viseme.ts     map Polly → Oculus, đọc speech marks, gợi ý khẩu hình VI
 public/
-  index.html    4 màn: chọn bài / đang học / luyện khẩu hình / tổng kết
+  index.html    3 màn: chọn bài / đang học / tổng kết
   src/realtime.ts      transport WebRTC thuần
   src/recorder.ts      ghi PCM liên tục + cắt WAV theo message (chỉ mic)
   src/session.ts       điều phối buổi học, reconnect, gợi ý, điểm dừng
   src/polly-client.ts  ký SigV4 bằng WebCrypto, gọi thẳng Polly
   src/speech-queue.ts  cắt khúc → đọc trước → phát đúng thứ tự
   src/main.ts          DOM
-  src/drill.ts         màn luyện khẩu hình (nạp bằng dynamic import)
-  src/talk-avatar.ts   avatar cho màn hội thoại (dynamic import)
+  src/talk-avatar.ts   avatar + 15 thanh đo viseme (nạp bằng dynamic import)
   src/viseme-player.ts timeline → trọng số, bám audio.currentTime
   src/avatar.ts        three.js + morph target
 data/           app.db + audio/ (tự tạo, đã gitignore)
-                audio/drill/ = cache mp3 + viseme của Polly
 ```
 
-Client build bằng esbuild có **code splitting**: `drill.ts` và `talk-avatar.ts` được nạp bằng
-dynamic import nên three.js rơi vào chunk riêng, không nằm trong `bundle.js`. Ai không cấu hình
-avatar thì không bao giờ tải nó về.
+Client build bằng esbuild có **code splitting**: `talk-avatar.ts` được nạp bằng dynamic import nên
+three.js rơi vào chunk riêng (1.3MB), không nằm trong `bundle.js`.
 
 ## Cấu hình
 
@@ -301,9 +252,9 @@ avatar thì không bao giờ tải nó về.
 | `CDN_DOMAIN` | — | để trống thì phát lại bằng presigned GET |
 | `CF_KEY_PAIR_ID` | — | bắt buộc khi có `CDN_DOMAIN` |
 | `CF_PRIVATE_KEY` / `CF_PRIVATE_KEY_PATH` | — | đặt **một** trong hai; `CF_PRIVATE_KEY` được ưu tiên |
-| `POLLY` | `off` | `on` = bật Polly (màn luyện khẩu hình **và** tiếng nói của AI trong hội thoại) |
+| `POLLY` | `off` | `on` = AI có tiếng nói. Tắt thì AI chỉ hiện chữ |
 | `POLLY_REGION` | theo `S3_REGION` | bucket và Polly không bắt buộc cùng vùng |
-| `POLLY_VOICE` | `Joanna` | đổi giọng = đổi cache key, sinh lại toàn bộ |
+| `POLLY_VOICE` | `Joanna` | chỉ là mặc định — người học đổi giọng ngay trên màn học |
 | `POLLY_ENGINE` | `neural` | `standard` \| `neural` \| `long-form`. **Không** dùng được `generative` |
 | `POLLY_STS_ROLE_ARN` | — | để trống = AI **không nói được** trong hội thoại (vẫn hiện chữ). Role chỉ nên cho `polly:SynthesizeSpeech` |
 | `POLLY_STS_TTL_SEC` | `3600` | hạn credential tạm; AWS chặn trong 900..3600 |

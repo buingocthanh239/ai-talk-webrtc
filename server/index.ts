@@ -17,8 +17,6 @@ import { buildTools } from './tools.ts';
 import { gradeSession } from './grader.ts';
 import { pollyConfigFromEnv } from './polly.ts';
 import { pollyGrant as mintPollyGrant, stsConfigFromEnv } from './sts.ts';
-import { buildDrill } from './drill.ts';
-import type { DrillItem, DrillResponse } from '../shared/viseme.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC_DIR = join(ROOT, 'public');
@@ -109,12 +107,6 @@ async function pollyGrantFor(req: IncomingMessage, userId: string): Promise<Poll
     return null;
   }
 }
-
-/**
- * Drill da dung cho tung bai. Giu ca Promise chu khong chi ket qua, de hai
- * request den cung luc luc chua co cache khong cung goi Polly hai lan.
- */
-const drillCache = new Map<string, Promise<DrillItem[]>>();
 
 // -------------------------------------------------------------- danh tinh
 //
@@ -461,28 +453,6 @@ const routes: Route[] = [
       const lesson = lessons.get(id);
       if (!lesson) throw new HttpError(404, 'Khong tim thay bai hoc');
       return lesson;
-    },
-  },
-
-  {
-    method: 'GET',
-    pattern: /^\/api\/lessons\/([\w-]+)\/drill$/,
-    handler: async (_req, [id]): Promise<DrillResponse> => {
-      const lesson = lessons.get(id!);
-      if (!lesson) throw new HttpError(404, 'Khong tim thay bai hoc');
-      if (!polly) return { enabled: false, avatarUrl: null, items: [] };
-
-      // Lan goi dau cho mot bai co the mat vai giay (mot request Polly cho moi
-      // cau). Cac lan sau doc tu cache tren dia, va tu cache RAM nay thi khong
-      // cham dia nua. Lesson khong doi luc chay nen cache khong can het han.
-      let pending = drillCache.get(id!);
-      if (!pending) {
-        pending = buildDrill(polly, lesson);
-        drillCache.set(id!, pending);
-        // Hong thi xoa di de lan goi sau thu lai, khong ghim loi vinh vien.
-        pending.catch(() => drillCache.delete(id!));
-      }
-      return { enabled: true, avatarUrl: AVATAR_URL, items: await pending };
     },
   },
 

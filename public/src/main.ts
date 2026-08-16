@@ -2,8 +2,7 @@ import { api } from './api.ts';
 import { LessonSession } from './session.ts';
 import type { PttState, SessionHandlers } from './session.ts';
 // Chi lay KIEU o day. Module that duoc nap bang dynamic import trong
-// openDrill(), vi no keo theo three.js — xem build.js.
-import type { DrillScreen } from './drill.ts';
+// mountTalkAvatar(), vi no keo theo three.js — xem build.js.
 import type { TalkAvatar } from './talk-avatar.ts';
 import { synthesize } from './polly-client.ts';
 
@@ -45,12 +44,8 @@ function el<K extends keyof HTMLElementTagNameMap>(
 const screens = {
   home: $('screen-home'),
   live: $('screen-live'),
-  drill: $('screen-drill'),
   summary: $('screen-summary'),
 };
-
-/** null cho toi lan dau mo man luyen khau hinh. Xem openDrill(). */
-let drill: DrillScreen | null = null;
 
 /** Avatar cua man hoi thoai. null khi chua dung xong hoac da roi man. */
 let talkAvatar: TalkAvatar | null = null;
@@ -62,10 +57,9 @@ const errorMessage = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
 
 function showScreen(name: keyof typeof screens): void {
-  // Man luyen khau hinh giu rAF cho ca avatar lan thanh do; roi man ma khong
-  // dong thi no ve tiep duoi nen, an pin va CPU cho toi khi dong tab.
-  if (name !== 'drill') drill?.close();
-  // Cung ly do: avatar cua man hoi thoai giu mot vong rAF cua three.js.
+  // Avatar giu mot vong rAF cua three.js va mot vong nua cua VisemePlayer. Roi
+  // man ma khong dong thi no ve tiep duoi nen, an pin va CPU cho toi khi dong
+  // tab.
   if (name !== 'live') {
     talkAvatar?.dispose();
     talkAvatar = null;
@@ -130,7 +124,6 @@ async function loadHome(): Promise<void> {
     })
   );
 
-  renderDrillEntry(lessons);
 
   const history = $('history-list');
   if (sessions.length === 0) {
@@ -180,54 +173,6 @@ async function loadHome(): Promise<void> {
   );
 }
 
-/**
- * Loi vao man luyen khau hinh.
- *
- * Khong nhet duoc vao `.lesson-card` vi the do da la mot <button> — long
- * button trong button la HTML khong hop le va Safari bo hin nut ben trong.
- */
-function renderDrillEntry(lessons: Lesson[]): void {
-  const section = $('drill-entry');
-  section.classList.toggle('hidden', lessons.length === 0);
-
-  $('drill-lessons').replaceChildren(
-    ...lessons.map((lesson) => {
-      const chip = el('button', 'ghost-btn small', lesson.title);
-      chip.onclick = () => openDrill(lesson);
-      return chip;
-    })
-  );
-}
-
-async function openDrill(lesson: Lesson): Promise<void> {
-  showScreen('drill');
-  $('drill-title').textContent = `Luyện khẩu hình — ${lesson.title}`;
-  $('drill-status').textContent = 'Đang tải…';
-
-  if (!drill) {
-    try {
-      const { createDrillScreen } = await import('./drill.ts');
-      drill = createDrillScreen({
-        root: screens.drill,
-        list: $('drill-list'),
-        canvas: $<HTMLCanvasElement>('drill-canvas'),
-        avatarNote: $('drill-avatar-note'),
-        bars: $('drill-bars'),
-        hint: $('drill-hint'),
-        phrase: $('drill-phrase'),
-        audio: $<HTMLAudioElement>('drill-audio'),
-        playBtn: $<HTMLButtonElement>('drill-play'),
-        rateBtns: $('drill-rates'),
-        scrub: $<HTMLInputElement>('drill-scrub'),
-        status: $('drill-status'),
-      });
-    } catch (err) {
-      $('drill-status').textContent = `Không tải được màn luyện khẩu hình: ${errorMessage(err)}`;
-      return;
-    }
-  }
-  await drill.open(lesson.id);
-}
 
 // ─────────────────────────────────── live ───────────────────────────────────
 
@@ -517,7 +462,7 @@ $<HTMLInputElement>('save-audio').onchange = (e) => {
 /**
  * Dung avatar cho man hoi thoai.
  *
- * Nap bang dynamic import giong `openDrill()`: no keo theo three.js, va nguoi
+ * Nap bang dynamic import: no keo theo three.js, va nguoi
  * hoc khong cau hinh avatar thi khong co ly do tai ve.
  *
  * Goi lai moi lan bat tay (ke ca reconnect) nen phai chan dung hai lan — mot
@@ -532,6 +477,8 @@ async function mountTalkAvatar(avatarUrl: string | null): Promise<void> {
     talkAvatar = await createTalkAvatar({
       canvas: $<HTMLCanvasElement>('talk-canvas'),
       note: $('talk-avatar-note'),
+      bars: $('talk-bars'),
+      hint: $('talk-hint'),
       audio: $<HTMLAudioElement>('ai-audio'),
       avatarUrl,
     });
@@ -1081,6 +1028,5 @@ async function openSavedSession(id: string): Promise<void> {
 }
 
 $<HTMLButtonElement>('btn-home').onclick = loadHome;
-$<HTMLButtonElement>('btn-drill-home').onclick = loadHome;
 
 loadHome();

@@ -124,24 +124,6 @@ export interface VisemeFrame {
   weight: number;
 }
 
-/** Mot cau/tu de luyen khau hinh, kem audio va timeline da tinh san. */
-export interface DrillItem {
-  id: string;
-  text: string;
-  /** Nhan de biet cau nay tu dau ra: tu vung hay vi du cua muc tieu. */
-  source: 'vocabulary' | 'example';
-  audioUrl: string;
-  frames: VisemeFrame[];
-}
-
-export interface DrillResponse {
-  /** false khi chua cau hinh Polly — client an tab luyen khau hinh di. */
-  enabled: boolean;
-  /** URL file .glb cua avatar. null thi client chi ve thanh do viseme. */
-  avatarUrl: string | null;
-  items: DrillItem[];
-}
-
 /**
  * Doi mot mark cua Polly sang frame. Tra null cho gia tri khong nhan ra —
  * bo qua con hon la nem, vi Polly co the them viseme moi cho ngon ngu khac
