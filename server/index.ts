@@ -10,6 +10,7 @@ import type { Lesson, ProgressRecord, Quota } from '../shared/types.ts';
 
 import * as db from './db.ts';
 import { AUDIO_DIR } from './db.ts';
+import * as audio from './audio-store.ts';
 import { buildInstructions, buildResumeContext, buildTranscriptionPrompt } from './prompt.ts';
 import type { ResumeContext } from './prompt.ts';
 import { buildTools } from './tools.ts';
@@ -82,6 +83,26 @@ function deviceId(req: IncomingMessage, res: ServerResponse): string {
   );
   return id;
 }
+
+/**
+ * Them Set-Cookie ma khong de len cookie da co.
+ *
+ * `deviceId()` cung ghi Set-Cookie, va `res.setHeader` thi GHI DE chu khong
+ * noi them — cap cookie nghe lai bang setHeader se lam mat luon cookie `did`
+ * cua thiet bi vua duoc cap.
+ */
+function appendCookies(res: ServerResponse, cookies: string[]): void {
+  if (!cookies.length) return;
+  const existing = res.getHeader('Set-Cookie');
+  const before = Array.isArray(existing) ? existing : existing ? [String(existing)] : [];
+  res.setHeader('Set-Cookie', [...before, ...cookies]);
+}
+
+/**
+ * Client native khong co cookie jar tu nhien, nen phai ky thang vao URL.
+ * Nhan dien bang chinh header ma mobile dung de dinh danh.
+ */
+const isNativeClient = (req: IncomingMessage): boolean => Boolean(req.headers['x-device-id']);
 
 function sendJSON(res: ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
@@ -496,8 +517,14 @@ const routes: Route[] = [
   {
     method: 'GET',
     pattern: /^\/api\/sessions\/([\w-]+)$/,
-    handler: (_req, [id]) => {
+    handler: (req, [id], res) => {
       const { session, lesson } = requireSession(id);
+
+      // Man tong ket la cho duy nhat nghe lai, nen cap quyen nghe ngay tai day
+      // thay vi de client phai xin them mot vong nua.
+      appendCookies(res, audio.playbackCookies(id));
+      const signed = isNativeClient(req);
+
       return {
         sessionId: session.id,
         status: session.status,
@@ -505,7 +532,10 @@ const routes: Route[] = [
         endedAt: session.ended_at,
         hintCount: session.hint_count,
         lesson,
-        messages: db.listMessages(id),
+        messages: db.listMessages(id).map(({ audioPath, audioStore, ...m }) => ({
+          ...m,
+          audioUrl: audioPath ? audio.playbackUrl(audioStore, audioPath, signed) : null,
+        })),
         progress: db.listProgress(id),
         summary: session.summary_json ? JSON.parse(session.summary_json) : null,
       };
@@ -549,6 +579,9 @@ const routes: Route[] = [
         model: secret.model,
         seedItems: resumeContext?.seedItems ?? [],
         progress,
+        // Cap lai moi lan xin token: buoi hoc dai hon han cua grant, hoac
+        // reconnect sau khi treo may lau, thi quyen ghi cu da het han.
+        uploadGrant: audio.uploadGrant(id),
       };
     },
   },
@@ -567,25 +600,58 @@ const routes: Route[] = [
     },
   },
 
-  /** Nhan raw WAV cua tung message. Client upload ngay khi cat xong, khong doi cuoi buoi. */
+  /**
+   * Gan audio vao mot message. Client goi ngay khi cat xong, khong doi cuoi buoi.
+   *
+   * Hai duong vao, phan biet bang Content-Type:
+   *
+   *   application/json  — client da day thang len S3, day chi la xac nhan.
+   *   audio/wav         — raw WAV, server ghi xuong dia (mac dinh, va la duong
+   *                       roi ve khi khong cau hinh S3).
+   *
+   * Duong disk giu lai chu khong xoa: buoi hoc cu van nghe lai duoc, va S3
+   * hong thi con cho ma lui ve.
+   */
   {
     method: 'POST',
     pattern: /^\/api\/sessions\/([\w-]+)\/messages\/(\d+)\/audio$/,
     handler: async (req, [id, seqRaw]) => {
       requireSession(id);
       const seq = Number(seqRaw);
+
+      if (req.headers['content-type']?.includes('application/json')) {
+        const { key, role: rawRole, bytes, durationMs } = await readJSON(req);
+        const role = rawRole === 'assistant' ? 'assistant' : 'user';
+
+        // Khong tin key client gui: dung lai tu (sessionId, seq, role) roi doi
+        // chieu. Policy da chan ghi ra ngoai prefix cua session, cho nay chan
+        // not viec gan nham file cua message khac trong cung session.
+        let verified: string;
+        try {
+          verified = audio.verifyKey(id, seq, role, String(key));
+        } catch (err) {
+          throw new HttpError(400, errorMessage(err));
+        }
+
+        db.attachAudio(id, seq, verified, 's3', Number(durationMs) || null);
+        return {
+          ok: true,
+          audioUrl: audio.playbackUrl('s3', verified, isNativeClient(req)),
+          bytes: Number(bytes) || null,
+        };
+      }
+
       const buf = await readBody(req);
       if (buf.length < 45) throw new HttpError(400, 'File WAV rong');
 
       const role = req.headers['x-role'] === 'assistant' ? 'assistant' : 'user';
       const durationMs = Number(req.headers['x-duration-ms']) || null;
 
-      const dir = join(AUDIO_DIR, id);
-      await mkdir(dir, { recursive: true });
-      const relative = join(id, `${String(seq).padStart(3, '0')}-${role}.wav`);
+      await mkdir(join(AUDIO_DIR, id), { recursive: true });
+      const relative = audio.diskPath(id, seq, role);
       await writeFile(join(AUDIO_DIR, relative), buf);
 
-      db.attachAudio(id, seq, relative, durationMs);
+      db.attachAudio(id, seq, relative, 'disk', durationMs);
       return { ok: true, audioUrl: `/audio/${relative}`, bytes: buf.length };
     },
   },
@@ -624,15 +690,11 @@ const routes: Route[] = [
       }
 
       const { reason } = await readJSON(req);
-      const messages = db.listMessages(id).map((m) => ({
-        ...m,
-        audioPath: m.audioUrl ? m.audioUrl.replace('/audio/', '') : null,
-      }));
 
       const summary = await gradeSession({
         lesson,
         session,
-        messages,
+        messages: db.listMessages(id),
         progress: db.listProgress(id),
       });
 

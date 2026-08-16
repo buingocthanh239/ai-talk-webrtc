@@ -8,6 +8,7 @@ import type {
   SessionListItem,
   Summary,
   TokenResponse,
+  UploadGrant,
 } from '../../shared/types.ts';
 
 /**
@@ -82,6 +83,7 @@ export const api = {
   endSession: (id: string, reason: string) =>
     request<{ summary: Summary | null }>(`/api/sessions/${id}/end`, json('POST', { reason })),
 
+  /** Duong roi ve khi server luu audio tren dia: WAV di xuyen qua backend. */
   uploadAudio: (id: string, seq: number, role: Role, durationMs: number, blob: Blob) =>
     request<{ ok: true; audioUrl: string; bytes: number }>(
       `/api/sessions/${id}/messages/${seq}/audio`,
@@ -95,6 +97,40 @@ export const api = {
         body: blob,
       }
     ),
+
+  /** Bao server rang file da nam tren S3. Chi la metadata, khong co byte nao. */
+  confirmAudio: (
+    id: string,
+    seq: number,
+    body: { key: string; role: Role; bytes: number; durationMs: number }
+  ) =>
+    request<{ ok: true; audioUrl: string; bytes: number | null }>(
+      `/api/sessions/${id}/messages/${seq}/audio`,
+      json('POST', body)
+    ),
 };
+
+/**
+ * Day thang len S3 bang presigned POST policy.
+ *
+ * Khong di qua `request()` vi day khong phai endpoint cua minh: S3 tra 204
+ * rong khi thanh cong va XML khi loi, khong phai JSON.
+ *
+ * Thu tu field khong phai chuyen thu vi: `key` truoc, cac field ky o giua, va
+ * `file` PHAI o cuoi — S3 ngung doc form ngay khi gap `file`, field nao dung
+ * sau no coi nhu khong ton tai.
+ */
+export async function putAudioToS3(grant: UploadGrant, key: string, blob: Blob): Promise<void> {
+  const form = new FormData();
+  form.append('key', key);
+  for (const [name, value] of Object.entries(grant.fields)) form.append(name, value);
+  form.append('file', blob);
+
+  // Khong tu dat Content-Type: trinh duyet phai tu sinh boundary cua multipart.
+  const res = await fetch(grant.url, { method: 'POST', body: form });
+  if (!res.ok) {
+    throw new Error(`S3 tu choi upload (${res.status}): ${(await res.text()).slice(0, 200)}`);
+  }
+}
 
 export type { Message };

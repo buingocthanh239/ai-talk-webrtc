@@ -166,9 +166,17 @@ function setBanner(text: string | null, kind?: 'info' | 'warn' | 'error'): void 
   banner.textContent = text;
 }
 
+/** Duoi nguong nay layout doi sang mot cot — trung voi @media trong styles.css. */
+const NARROW = '(max-width: 860px)';
+
 function renderPanel(lesson: Lesson): void {
   $('live-title').textContent = lesson.title;
   $('live-meta').textContent = `${lesson.level} · ~${lesson.estimatedMinutes} phút`;
+
+  // Man hinh hep thi mo san panel se day transcript va nut noi xuong duoi
+  // man hinh gap. Gap lai, nguoi hoc tu mo khi can xem tu vung.
+  const panel = $('lesson-panel') as HTMLDetailsElement;
+  panel.open = !window.matchMedia(NARROW).matches;
 
   $('vocab-list').replaceChildren(
     ...lesson.vocabulary.map((v) => {

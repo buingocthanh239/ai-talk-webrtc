@@ -1,12 +1,10 @@
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { AUDIO_DIR } from './db.ts';
+import { readAudio } from './audio-store.ts';
 
-import type { Lesson, Message, ProgressRecord, Summary } from '../shared/types.ts';
-import type { SessionRow } from './db.ts';
+import type { Lesson, ProgressRecord, Summary } from '../shared/types.ts';
+import type { SessionRow, StoredMessage } from './db.ts';
 
-/** Message kem duong dan file wav tren dia — chi khau cham diem moi can. */
-export type GradingMessage = Message & { audioPath: string | null };
+/** Message kem cho luu file wav — chi khau cham diem moi can. */
+export type GradingMessage = StoredMessage;
 
 const API = 'https://api.openai.com/v1/chat/completions';
 
@@ -213,28 +211,46 @@ async function gradeAudio(
     | { type: 'text'; text: string }
     | { type: 'input_audio'; input_audio: { data: string; format: 'wav' } };
 
+  // Tai song song va chiu loi TUNG file: mot doan hong thi bo doan do, khong
+  // keo do ca khau cham phat am. Voi S3 chuyen nay thuc te hon so voi doc dia
+  // — client co the da tat may giua chung khi dang day len.
+  const loaded = await Promise.all(
+    segments.map(async (seg) => {
+      try {
+        const buf = await readAudio(seg.audioStore, seg.audioPath);
+        return { seq: seg.seq, base64: buf.toString('base64') };
+      } catch (err) {
+        console.warn(`[grader] bo qua audio seq=${seg.seq}:`, (err as Error).message);
+        return null;
+      }
+    })
+  );
+
+  // Prompt dung sau khi tai xong: danh sach seq phai khop dung nhung clip that
+  // su gui di, neu khong model se gan diem cho nham cau.
+  const usable = loaded.filter((x): x is { seq: number; base64: string } => x !== null);
+  if (usable.length === 0) return null;
+
   const content: AudioPart[] = [
     {
       type: 'text',
       text:
         `Assess the pronunciation of a Vietnamese learner of English at CEFR level ${lesson.level}. ` +
-        `You will hear ${segments.length} short clips of the learner speaking, in order. ` +
-        `Clip message_seq values are, in order: ${segments.map((s) => s.seq).join(', ')}.\n` +
+        `You will hear ${usable.length} short clips of the learner speaking, in order. ` +
+        `Clip message_seq values are, in order: ${usable.map((s) => s.seq).join(', ')}.\n` +
         `For each clip, score 0-100 and list concrete pronunciation issues you actually hear ` +
         `(specific sounds, word stress, intonation, dropped final consonants). ` +
         `Common Vietnamese-speaker patterns to listen for: dropped final /s/ /z/ /t/ /d/, ` +
         `/θ/ and /ð/ substitutions, consonant clusters, flat sentence intonation.\n` +
         `Do not invent issues you cannot hear. "note_vi" is one or two sentences in Vietnamese.`,
     },
+    ...usable.map(
+      (seg): AudioPart => ({
+        type: 'input_audio',
+        input_audio: { data: seg.base64, format: 'wav' },
+      })
+    ),
   ];
-
-  for (const seg of segments) {
-    const buf = await readFile(join(AUDIO_DIR, seg.audioPath));
-    content.push({
-      type: 'input_audio',
-      input_audio: { data: buf.toString('base64'), format: 'wav' },
-    });
-  }
 
   return callOpenAI({
     model,

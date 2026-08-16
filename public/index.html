@@ -38,19 +38,29 @@
       <div id="status-banner" class="banner hidden"></div>
 
       <div class="live-layout">
-        <aside class="panel">
+        <aside class="side">
           <button id="btn-quit" class="link-btn">← Thoát</button>
-          <h2 id="live-title"></h2>
-          <div id="live-meta" class="meta"></div>
 
-          <h3>Mục tiêu bài học</h3>
-          <ul id="objective-list" class="objectives"></ul>
+          <!-- Tren dien thoai panel nay gap lai (main.ts dong san) de nhuong
+               man hinh cho transcript va nut giu-de-noi. -->
+          <details id="lesson-panel" class="panel" open>
+            <summary class="panel-head">
+              <div class="panel-head-text">
+                <h2 id="live-title"></h2>
+                <div id="live-meta" class="meta"></div>
+              </div>
+              <span class="panel-caret" aria-hidden="true">▾</span>
+            </summary>
 
-          <h3>Từ vựng cần dùng</h3>
-          <ul id="vocab-list" class="vocab"></ul>
+            <h3>Mục tiêu bài học</h3>
+            <ul id="objective-list" class="objectives"></ul>
 
-          <h3>Ngữ pháp trọng tâm</h3>
-          <ul id="grammar-list" class="grammar"></ul>
+            <h3>Từ vựng cần dùng</h3>
+            <ul id="vocab-list" class="vocab"></ul>
+
+            <h3>Ngữ pháp trọng tâm</h3>
+            <ul id="grammar-list" class="grammar"></ul>
+          </details>
         </aside>
 
         <section class="stage">

@@ -46,8 +46,22 @@ interface MessageRow {
   role: Role;
   text: string;
   audio_path: string | null;
+  audio_store: AudioStore;
   duration_ms: number | null;
 }
+
+/** Audio nam tren dia cua server hay tren S3. Ghi theo tung message chu khong
+ * theo ca he thong: bat S3 giua chung thi cac buoi cu van nghe lai duoc. */
+export type AudioStore = 'disk' | 's3';
+
+/**
+ * Message kem cho luu that. `audioUrl` khong tinh o day vi no phu thuoc CDN /
+ * chu ky — `audio-store.ts` lo phan do, DB chi giu su that tho.
+ */
+export type StoredMessage = Message & {
+  audioPath: string | null;
+  audioStore: AudioStore;
+};
 
 interface ProgressRow {
   objective_id: string;
@@ -86,6 +100,7 @@ CREATE TABLE IF NOT EXISTS message (
   role        TEXT NOT NULL,                     -- user | assistant
   text        TEXT NOT NULL DEFAULT '',
   audio_path  TEXT,
+  audio_store TEXT NOT NULL DEFAULT 'disk',       -- disk | s3
   duration_ms INTEGER,
   created_at  INTEGER NOT NULL,
   UNIQUE (session_id, seq)
@@ -116,6 +131,18 @@ CREATE INDEX IF NOT EXISTS idx_message_session ON message(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_call_user ON call(user_id, started_at);
 `);
 
+// CREATE TABLE IF NOT EXISTS khong dong them cot vao bang da co, nen DB tao
+// truoc khi co S3 phai duoc va lai bang tay. Mac dinh 'disk' la dung: tat ca
+// nhung gi ghi truoc do deu nam tren dia.
+{
+  const columns = db.prepare(`SELECT name FROM pragma_table_info('message')`).all() as unknown as {
+    name: string;
+  }[];
+  if (!columns.some((c) => c.name === 'audio_store')) {
+    db.exec(`ALTER TABLE message ADD COLUMN audio_store TEXT NOT NULL DEFAULT 'disk'`);
+  }
+}
+
 const q = {
   createSession: db.prepare(
     `INSERT INTO session (id, lesson_id, user_id, started_at) VALUES (?, ?, ?, ?)`
@@ -138,10 +165,11 @@ const q = {
        duration_ms = COALESCE(excluded.duration_ms, message.duration_ms)`
   ),
   setAudio: db.prepare(
-    `UPDATE message SET audio_path = ?, duration_ms = ? WHERE session_id = ? AND seq = ?`
+    `UPDATE message SET audio_path = ?, audio_store = ?, duration_ms = ?
+     WHERE session_id = ? AND seq = ?`
   ),
   listMessages: db.prepare(
-    `SELECT seq, role, text, audio_path, duration_ms FROM message
+    `SELECT seq, role, text, audio_path, audio_store, duration_ms FROM message
      WHERE session_id = ? ORDER BY seq ASC`
   ),
 
@@ -216,18 +244,25 @@ export function saveMessage(sessionId: string, { seq, role, text, durationMs }: 
 export function attachAudio(
   sessionId: string,
   seq: number,
-  relativePath: string,
+  path: string,
+  store: AudioStore,
   durationMs: number | null
 ): void {
-  q.setAudio.run(relativePath, durationMs ?? null, sessionId, seq);
+  q.setAudio.run(path, store, durationMs ?? null, sessionId, seq);
 }
 
-export function listMessages(sessionId: string): Message[] {
+/**
+ * `audioUrl` co tinh de null: chi `audio-store.ts` moi biet dung URL nao (dia,
+ * CDN, hay presigned), nen goi phai tu dien vao truoc khi tra xuong client.
+ */
+export function listMessages(sessionId: string): StoredMessage[] {
   return (q.listMessages.all(sessionId) as unknown as MessageRow[]).map((m) => ({
     seq: m.seq,
     role: m.role,
     text: m.text,
-    audioUrl: m.audio_path ? `/audio/${m.audio_path}` : null,
+    audioUrl: null,
+    audioPath: m.audio_path,
+    audioStore: m.audio_store ?? 'disk',
     durationMs: m.duration_ms,
   }));
 }

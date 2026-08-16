@@ -57,8 +57,27 @@ timestamp lấy từ event realtime:
 
 Cắt xong upload ngay từng đoạn, không đợi cuối buổi — crash giữa chừng vẫn còn dữ liệu.
 
-**DB** (`data/app.db`, SQLite): `session` / `message` / `progress`. File WAV nằm ở
-`data/audio/<sessionId>/<seq>-<role>.wav`.
+**DB** (`data/app.db`, SQLite): `session` / `message` / `progress`. Mỗi message ghi kèm
+`audio_store` (`disk` | `s3`) nên hai kiểu lưu sống chung được — bật S3 giữa chừng thì các buổi cũ
+vẫn nghe lại bình thường.
+
+**Nơi để file WAV**, chọn bằng `AUDIO_STORE`:
+
+| | `disk` (mặc định) | `s3` |
+|---|---|---|
+| Đường đi | WAV đi xuyên qua backend | client `POST` thẳng lên bucket |
+| Chỗ nằm | `data/audio/<sessionId>/<seq>-<role>.wav` | `audio/<sessionId>/<seq>-<role>.wav` |
+| Backend nhận | cả file | chỉ metadata `{key, bytes, durationMs}` |
+
+Ở chế độ `s3`, server cấp **một** presigned POST policy cho cả buổi lúc mint token
+(`starts-with $key → audio/<sessionId>/`, `content-length-range 45..5MB`, hạn 2h). Client tự đặt tên
+file cho từng lượt nói nên **không phải xin URL trước mỗi câu** — số request tới backend không đổi so
+với trước, chỉ có byte audio là biến mất khỏi Node. Policy ràng theo prefix nên một client sửa vài
+dòng cũng không ghi lấn được sang buổi của người khác; server còn dựng lại key từ
+`(sessionId, seq, role)` để đối chiếu chứ không tin key client gửi.
+
+Ký SigV4 và ký CloudFront đều viết tay bằng `node:crypto` (`server/s3.ts`, `server/cdn.ts`) — kéo cả
+AWS SDK về chỉ để làm hai việc này là không đáng với một dự án không có dependency nào.
 
 **Học lại:** buổi đã lưu chính là content — nghe lại cả buổi, nghe lại riêng câu sai, hoặc nạp
 buổi cũ làm ngữ cảnh cho buổi mới.
@@ -120,5 +139,25 @@ data/           app.db + audio/ (tự tạo, đã gitignore)
 | `REALTIME_VOICE` | `marin` | giọng AI |
 | `GRADER_TEXT_MODEL` | `gpt-4o` | chấm grammar/vocab/mục tiêu |
 | `GRADER_AUDIO_MODEL` | `gpt-4o-audio-preview` | để trống = tắt chấm phát âm |
+| `AUDIO_STORE` | `disk` | `s3` = client đẩy thẳng lên bucket |
+| `S3_REGION` / `S3_BUCKET` | — | bắt buộc khi `AUDIO_STORE=s3` |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | nt |
+| `S3_ENDPOINT` | — | chỉ khi dev với MinIO; có giá trị = dùng path-style URL |
+| `CDN_DOMAIN` | — | để trống thì phát lại bằng presigned GET |
+| `CF_KEY_PAIR_ID` / `CF_PRIVATE_KEY_PATH` | — | bắt buộc khi có `CDN_DOMAIN` |
+
+Thiếu biến bắt buộc thì server ngã ra ngay lúc khởi động, không đợi tới lúc người học nói xong câu
+đầu tiên mới phát hiện không lưu được audio.
 
 Thêm bài học mới: bỏ một file JSON vào `server/lessons/` rồi restart. Không cần sửa code.
+
+## Test
+
+```bash
+npm test        # test vector SigV4 + chữ ký CloudFront (không cần mạng)
+npm run test:s3 # thêm: chạy thật trên MinIO qua docker compose
+```
+
+Test vector chỉ chứng minh mình ký ra đúng chuỗi đó; nó không chứng minh S3 **chấp nhận** chữ ký.
+Hai lỗi hay gặp nhất — thứ tự field trong `FormData` và điều kiện policy sai — chỉ lộ ra ở
+`npm run test:s3`. Không có `S3_ENDPOINT` thì các test đó tự skip.

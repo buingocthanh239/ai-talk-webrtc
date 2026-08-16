@@ -1,0 +1,45 @@
+services:
+  app:
+    image: ${REGISTRY:-762871078113.dkr.ecr.ap-southeast-1.amazonaws.com}/ai-talk-rtc-test:${TAG:-dev}
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    volumes:
+      - appdata:/app/data
+
+  # Chi chay khi dev: `docker compose --profile dev up minio`.
+  #
+  # MinIO noi duoc ca presigned POST policy lan SigV4, nen duong S3 duoc chay
+  # that ma khong can tai khoan AWS — thu duy nhat khong kiem tra duoc bang
+  # test vector la S3 co CHAP NHAN chu ky cua minh hay khong.
+  minio:
+    profiles: ["dev"]
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+
+  # Tao san bucket roi thoat, de khong phai vao console bam tay.
+  minio-init:
+    profiles: ["dev"]
+    image: minio/mc
+    depends_on: [minio]
+    entrypoint: >
+      sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done;
+      mc mb --ignore-existing local/ai-learn-audio;
+      "
+
+volumes:
+  appdata:
+  miniodata:

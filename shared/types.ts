@@ -121,10 +121,28 @@ export interface SeedItem {
   text: string;
 }
 
+/**
+ * Quyen ghi thang len S3, cap mot lan cho ca buoi hoc.
+ *
+ * Chu ky rang buoc theo DIEU KIEN chu khong theo mot key cu the, nen client
+ * dat duoc ten file cho tung luot noi ma khong phai xin lai — khong them round
+ * trip nao tren duong nong sau moi cau. `fields` phai duoc dua vao FormData
+ * TRUOC phan `file`, dung thu tu nay.
+ *
+ * null nghia la server dang luu audio tren dia: cu POST WAV len backend nhu cu.
+ */
+export interface UploadGrant {
+  url: string;
+  fields: Record<string, string>;
+  keyPrefix: string;
+  expiresAt: number;
+}
+
 export interface TokenResponse {
   clientSecret: string;
   expiresAt: number;
   model: string;
   seedItems: SeedItem[];
   progress: ProgressRecord[];
+  uploadGrant: UploadGrant | null;
 }

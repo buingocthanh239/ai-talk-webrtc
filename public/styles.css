@@ -17,11 +17,25 @@
   box-sizing: border-box;
 }
 
+html {
+  /* iOS phong to chu khi xoay ngang neu khong khoa lai. */
+  -webkit-text-size-adjust: 100%;
+}
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
   font: 15px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* Transcript va tu vung co the chua tu dai/URL — thu hep man hinh khong
+     duoc lam trang tran ngang. */
+  overflow-wrap: break-word;
+}
+
+img,
+audio,
+video {
+  max-width: 100%;
 }
 
 h1,
@@ -51,7 +65,7 @@ h3 {
 }
 
 .hero h1 {
-  font-size: 2rem;
+  font-size: clamp(1.5rem, 6vw, 2rem);
   margin: 0 0 0.3rem;
 }
 .hero p {
@@ -107,7 +121,8 @@ button {
 
 .card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  /* min() de o may hep hon 280px cot van co lai thay vi tran ra ngoai. */
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
   gap: 1rem;
 }
 
@@ -223,10 +238,11 @@ button {
   gap: 1.5rem;
   align-items: start;
 }
-@media (max-width: 860px) {
-  .live-layout {
-    grid-template-columns: 1fr;
-  }
+
+.side {
+  position: sticky;
+  top: 1.5rem;
+  min-width: 0;
 }
 
 .panel {
@@ -234,14 +250,37 @@ button {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 1.2rem;
-  position: sticky;
-  top: 1.5rem;
-  max-height: calc(100vh - 3rem);
+  max-height: calc(100dvh - 5rem);
   overflow-y: auto;
 }
 .panel h2 {
   margin: 0;
   font-size: 1.1rem;
+}
+.panel h3:first-of-type {
+  margin-top: 1.2rem;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  cursor: pointer;
+  list-style: none;
+}
+.panel-head::-webkit-details-marker {
+  display: none;
+}
+.panel-head-text {
+  flex: 1;
+  min-width: 0;
+}
+.panel-caret {
+  color: var(--muted);
+  transition: transform 0.15s;
+}
+.panel[open] .panel-caret {
+  transform: rotate(180deg);
 }
 .meta {
   color: var(--muted);
@@ -307,7 +346,8 @@ button {
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  min-height: calc(100vh - 6rem);
+  min-height: calc(100dvh - 6rem);
+  min-width: 0;
 }
 
 .transcript {
@@ -663,4 +703,187 @@ button {
   color: var(--muted);
   padding: 3rem 0;
   text-align: center;
+}
+
+/* ─────────────────────────── man hinh nho ───────────────────────────
+   Hai nguong: 860px doi live-layout ve mot cot, 600px la dien thoai
+   thuc su — bop padding, cho cac hang tu xuong dong, va giu transcript
+   cuon rieng de nut giu-de-noi khong bi day khoi man hinh. */
+
+@media (max-width: 860px) {
+  .screen {
+    padding: 1.25rem 1rem 2rem;
+  }
+
+  .live-layout {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+
+  /* Panel het dinh: o mot cot no nam tren, dinh lai se che het transcript. */
+  .side {
+    position: static;
+  }
+  .panel {
+    padding: 0.9rem 1rem;
+    max-height: none;
+  }
+  .panel[open] {
+    max-height: 50dvh;
+    overflow-y: auto;
+  }
+  .panel h2 {
+    font-size: 1rem;
+  }
+  .panel h3 {
+    margin: 1.1rem 0 0.5rem;
+  }
+
+  .stage {
+    min-height: 0;
+    gap: 0.75rem;
+  }
+  /* Chieu cao co tran: transcript tu cuon (main.ts auto-scroll xuong cuoi),
+     phan dock ben duoi luon nam trong tam nhin. */
+  .transcript {
+    min-height: 34dvh;
+    max-height: 48dvh;
+    padding-right: 0.2rem;
+  }
+
+  .bubble {
+    max-width: 88%;
+  }
+}
+
+@media (max-width: 600px) {
+  .screen {
+    padding: 1rem 0.85rem 1.75rem;
+  }
+  h2 {
+    margin: 1.5rem 0 0.75rem;
+    font-size: 1.08rem;
+  }
+
+  /* Vung cham it nhat ~40px cho cac nut chu. */
+  .link-btn {
+    padding: 0.4rem 0;
+  }
+
+  .lesson-card {
+    padding: 1rem;
+  }
+
+  .history-row {
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    padding: 0.8rem;
+  }
+  .history-row .grow {
+    flex: 1 1 100%;
+  }
+  .history-row .small {
+    flex: 1 1 auto;
+    text-align: center;
+  }
+
+  /* ── live ── */
+  .transcript {
+    min-height: 30dvh;
+    max-height: 42dvh;
+  }
+  .bubble {
+    max-width: 92%;
+    padding: 0.6rem 0.8rem;
+  }
+
+  .dock {
+    gap: 0.6rem;
+  }
+  .hints {
+    min-height: 0;
+  }
+  /* Goi y "giu phim Space" chi dung cho ban phim — tren dien thoai chu
+     tren nut da noi du. */
+  .ptt-tip {
+    display: none;
+  }
+  .ptt-btn {
+    padding: 0.9rem;
+    min-height: 52px;
+  }
+
+  .compose input {
+    /* Duoi 16px Safari iOS tu phong to trang khi focus. */
+    font-size: 16px;
+  }
+
+  .controls {
+    flex-wrap: wrap;
+    gap: 0.5rem 0.75rem;
+  }
+  .controls .ghost-btn,
+  .controls .primary-btn {
+    flex: 1 1 45%;
+  }
+  .controls .primary-btn,
+  .controls .quota-clock ~ .primary-btn {
+    margin-left: 0;
+  }
+
+  /* ── tong ket ── */
+  .score-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(110px, 45%), 1fr));
+    gap: 0.6rem;
+    margin: 1rem 0 1.5rem;
+  }
+  .score {
+    padding: 0.8rem 0.6rem;
+  }
+  .score .value {
+    font-size: 1.6rem;
+  }
+  .score.hero-score {
+    grid-column: 1 / -1;
+  }
+
+  .note,
+  .mistake {
+    padding: 0.8rem 0.9rem;
+  }
+  .mistake audio {
+    width: 100%;
+  }
+
+  /* Ba cot role/text/audio khong vua may hep — xep chong len nhau. */
+  .replay-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.35rem;
+  }
+  .replay-row .role {
+    flex: none;
+  }
+  .replay-row audio {
+    width: 100%;
+    height: 34px;
+  }
+  .replay-row .no-audio {
+    flex: none;
+    text-align: left;
+  }
+}
+
+/* Dien thoai xoay ngang: chieu cao la thu hiem, cat bot phan trang tri. */
+@media (max-height: 520px) and (max-width: 960px) {
+  .transcript {
+    min-height: 26dvh;
+    max-height: 38dvh;
+  }
+  .panel[open] {
+    max-height: 40dvh;
+  }
+  .ptt-tip {
+    display: none;
+  }
 }

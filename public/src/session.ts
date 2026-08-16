@@ -1,4 +1,4 @@
-import { api, ApiError } from './api.ts';
+import { api, ApiError, putAudioToS3 } from './api.ts';
 import { RealtimeConnection } from './realtime.ts';
 import type { RealtimeEvent } from './realtime.ts';
 import { TrackRecorder } from './recorder.ts';
@@ -11,6 +11,7 @@ import type {
   Quota,
   Role,
   SeedItem,
+  UploadGrant,
 } from '../../shared/types.ts';
 
 /** Trang thai nut push-to-talk. Chi 'ready' moi cho bat dau noi. */
@@ -61,11 +62,38 @@ const PTT_MIN_MS = 300;
 /** Tran an toan: neu khong chot duoc luc AI ngung tieng thi van mo lai nut. */
 const PTT_UNLOCK_FAILSAFE_MS = 8000;
 
+/** Lich thu lai khi day audio hong. Ngan hon BACKOFF_MS: mat mot doan audio
+ * khong lam hong buoi hoc, khong dang giu micro cua user lai 30 giay. */
+const UPLOAD_RETRY_MS = [0, 1000, 3000];
+
+/** Tran cho stop() doi upload. Qua nguong nay thi coi nhu mang chet — vao man
+ * tong ket con hon treo o man dang hoc. */
+const UPLOAD_DRAIN_TIMEOUT_MS = 5000;
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** `catch (err)` cho ra `unknown` duoi strict — boc mot lan o day. */
 const errorMessage = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
+
+/**
+ * Thu lai theo lich tren. Loi 4xx thi dung ngay: presigned policy sai hoac key
+ * bi tu choi thi thu them chi ton them thoi gian, khong bao gio thanh cong.
+ */
+async function retry<T>(fn: () => Promise<T>): Promise<T> {
+  let last: unknown;
+  for (const wait of UPLOAD_RETRY_MS) {
+    if (wait) await sleep(wait);
+    try {
+      return await fn();
+    } catch (err) {
+      last = err;
+      const status = err instanceof ApiError ? err.status : 0;
+      if (status >= 400 && status < 500) break;
+    }
+  }
+  throw last;
+}
 
 const HINT_INSTRUCTIONS: Record<number, string> = {
   1: 'The learner has gone quiet. Do not answer for them. Gently encourage them and rephrase your last question in simpler words. One or two short sentences.',
@@ -99,6 +127,11 @@ export class LessonSession {
   #ended = false;
   #stopped = false;
   #progress = new Map<string, ProgressRecord>();
+
+  /** Quyen ghi thang len S3. null = server dang luu audio tren dia. */
+  #uploadGrant: UploadGrant | null = null;
+  /** Cac doan dang cat/day. stop() phai doi het truoc khi tha micro. */
+  #pendingUploads = new Set<Promise<unknown>>();
 
   readonly sessionId: string;
   readonly lesson: Lesson;
@@ -215,6 +248,10 @@ export class LessonSession {
 
   async #connect({ resume }: { resume: boolean }): Promise<void> {
     const token = await api.getToken(this.sessionId, resume);
+    // Cap lai moi lan connect, ke ca reconnect: buoi hoc keo dai hon han cua
+    // grant thi quyen ghi cu da het, va lan xin token nay la dip re nhat de
+    // co cai moi.
+    this.#uploadGrant = token.uploadGrant ?? null;
 
     for (const p of token.progress ?? []) {
       this.#progress.set(p.objectiveId, p);
@@ -340,8 +377,15 @@ export class LessonSession {
       this.#callId = null;
     }
 
-    // Doi cac doan audio dang cat/upload kip hoan tat
-    await sleep(400);
+    // Doi cac doan audio dang cat/upload kip hoan tat.
+    //
+    // Truoc day day la sleep(400) — mot con so doan, va gio thi khong doan noi
+    // nua: duong S3 co hai chang (POST bucket roi confirm) cong them retry.
+    // Doi dung hang doi, kem tran cung de mang chet khong treo man tong ket.
+    await Promise.race([
+      Promise.allSettled([...this.#pendingUploads]),
+      sleep(UPLOAD_DRAIN_TIMEOUT_MS),
+    ]);
 
     this.#micRec?.stop();
     this.#aiRec?.stop();
@@ -777,28 +821,55 @@ export class LessonSession {
     this.#cutAndUpload(entry, 'assistant');
   }
 
-  /** Cat doan audio cua mot message va day len server ngay, khong doi cuoi buoi. */
+  /** Cat doan audio cua mot message va day len ngay, khong doi cuoi buoi. */
   async #cutAndUpload(
     entry: { seq: number; rec: TrackRecorder | null; startMs: number; endMs?: number | null },
     role: Role
   ): Promise<void> {
     // Khong co endMs thi chua chot duoc doan — bo qua con hon cat bua.
     if (entry.endMs == null) return;
-    try {
-      const blob = entry.rec?.sliceToWav(entry.startMs, entry.endMs);
-      if (!blob) return;
-      const durationMs = entry.endMs - entry.startMs;
-      const { audioUrl } = await api.uploadAudio(
-        this.sessionId,
-        entry.seq,
-        role,
-        durationMs,
-        blob
-      );
-      this.on.messageAudio(entry.seq, audioUrl, durationMs);
-    } catch (err) {
+    const blob = entry.rec?.sliceToWav(entry.startMs, entry.endMs);
+    if (!blob) return;
+    const durationMs = entry.endMs - entry.startMs;
+
+    // Ghi vao hang doi TRUOC khi await: stop() phai doi duoc ca nhung doan vua
+    // moi bat dau day.
+    const task = this.#upload(entry.seq, role, durationMs, blob).catch((err) => {
       console.warn(`[audio] khong luu duoc doan seq=${entry.seq}:`, errorMessage(err));
+    });
+    this.#pendingUploads.add(task);
+    await task.finally(() => this.#pendingUploads.delete(task));
+  }
+
+  /**
+   * Hai chang khi co S3: POST thang len bucket, roi bao server gan vao message.
+   * Khong co grant thi lui ve duong cu — WAV di xuyen qua backend.
+   */
+  async #upload(seq: number, role: Role, durationMs: number, blob: Blob): Promise<void> {
+    const grant = this.#uploadGrant;
+
+    if (!grant || grant.expiresAt <= Date.now()) {
+      const { audioUrl } = await retry(() =>
+        api.uploadAudio(this.sessionId, seq, role, durationMs, blob)
+      );
+      this.on.messageAudio(seq, audioUrl, durationMs);
+      return;
     }
+
+    const key = `${grant.keyPrefix}${String(seq).padStart(3, '0')}-${role}.wav`;
+    await retry(() => putAudioToS3(grant, key, blob));
+
+    // Chi bao len UI sau khi server da gan xong: bao som thi nut nghe lai tro
+    // vao mot object server chua biet, bam vao la hong.
+    const { audioUrl } = await retry(() =>
+      api.confirmAudio(this.sessionId, seq, {
+        key,
+        role,
+        bytes: blob.size,
+        durationMs: Math.round(durationMs),
+      })
+    );
+    this.on.messageAudio(seq, audioUrl, durationMs);
   }
 }
 
