@@ -23,7 +23,7 @@ import type { ResumeContext } from './prompt.ts';
 import { buildTools } from './tools.ts';
 import { gradeSession } from './grader.ts';
 import { pollyConfigFromEnv } from './polly.ts';
-import { pollyGrant as mintPollyGrant, stsConfigFromEnv } from './sts.ts';
+import { pollyGrant as mintPollyGrant, pollyCredsFromEnv, usesSts } from './sts.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC_DIR = join(ROOT, 'public');
@@ -121,14 +121,25 @@ const MIME: Record<string, string> = {
 const polly = pollyConfigFromEnv();
 
 /**
- * STS de cap credential tam cho client tu goi Polly trong hoi thoai.
+ * Credential cho client tu goi Polly trong hoi thoai.
  * null = chua cau hinh; AI se hien chu nhung khong co tieng.
  */
-const sts = stsConfigFromEnv();
+const pollyCreds = polly ? pollyCredsFromEnv(polly) : null;
 
-if (polly && !sts) {
+if (polly && !pollyCreds) {
   console.warn(
-    '  [polly] POLLY=on nhung chua co POLLY_STS_ROLE_ARN — AI se hien chu ma khong co tieng.'
+    '  [polly] POLLY=on nhung thieu AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY —\n' +
+      '          AI se hien chu ma khong co tieng.'
+  );
+}
+
+// Duong thang khong co rao nao: credential day du quyen cua IAM user, khong
+// han that, khong rang IP. Mot dong log de no la lua chon nhin thay duoc chu
+// khong phai thu am tham xay ra vi quen dat mot bien.
+if (pollyCreds && !usesSts(pollyCreds)) {
+  console.warn(
+    '  [polly] Khong co POLLY_STS_ROLE_ARN — dua thang credential AWS cua backend\n' +
+      '          xuong browser. Chi dung cho demo; production thi dat role ARN.'
   );
 }
 
@@ -155,12 +166,12 @@ async function pollyGrantFor(
   userId: string,
   character?: Character
 ): Promise<PollyGrant | null> {
-  if (!polly || !sts) return null;
+  if (!polly || !pollyCreds) return null;
   try {
     // Giong cua nhan vat de len mac dinh trong env: POLLY_VOICE gio chi con
     // la phuong an cuoi cho truong hop khong biet nhan vat nao.
     const cfg = character ? { ...polly, ...character.voice } : polly;
-    return await mintPollyGrant(cfg, sts, {
+    return await mintPollyGrant(cfg, pollyCreds, {
       sessionName: userId,
       sourceIp: clientIp(req),
     });

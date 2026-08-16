@@ -60,6 +60,27 @@ trọng số. Nhờ vậy thanh đo debug và avatar đọc chung đúng một n
 > Năm thanh bị làm mờ là năm khẩu hình Polly không bao giờ gọi tới (mục 4) — để không ai mất buổi
 > chiều đi tìm xem vì sao chúng đứng im.
 
+**Lỗi tầng mạng phải tự thử lại.** `net::ERR_CONNECTION_CLOSED` và `net::ERR_SOCKET_NOT_CONNECTED`
+là triệu chứng của một cuộc đua: trình duyệt giữ socket sống trong pool để dùng lại, AWS đóng socket
+rảnh sau một lát nằm không. Với `GET` trình duyệt tự âm thầm thử lại; với **`POST` thì không** — nó
+không biết request có an toàn để gửi lại hay không.
+
+App này dính đúng nhịp đó: nó bắn POST theo từng đợt (một lượt AI nói) rồi im trong lúc người học
+nói. `fetch` **ném** trong trường hợp này chứ không trả về status, nên đường retry theo `429` không
+hề chạm tới. `SynthesizeSpeech` cùng đầu vào cho ra cùng audio nên gửi lại là an toàn.
+
+**Audio và speech marks không ngang hàng nhau.** Polly trả hai thứ này bằng **hai request riêng**
+(speech marks trả về *thay cho* audio, không kèm theo — thiết kế của Polly, không gộp được). Hai
+request đó từng đi bằng `Promise.all`, nghĩa là marks hỏng thì mất luôn audio.
+
+Đó là một lỗi thật và nó bật ra thường xuyên: mỗi khúc bắn **hai** request, `MAX_IN_FLIGHT = 3` nên
+tới **6 request đồng thời**, trong khi Polly tính TPS theo **cả account**. Bên bị throttle rơi vào
+marks là chuyện bình thường — và khi đó khúc ấy im tiếng dù file mp3 đã về tới nơi.
+
+Thứ tự ưu tiên thật: **audio là thứ người học nghe, marks chỉ để avatar nhép.** Mất khẩu hình thì
+avatar đứng im một khúc; mất audio thì mất hẳn một đoạn bài học. Nên giờ marks được phép hỏng —
+`frames: []` và khúc vẫn đọc bình thường. Cùng nguyên tắc với `Promise.allSettled` ở khâu chấm điểm.
+
 Ba trường hợp hỏng của avatar được báo **khác nhau**, vì cách sửa khác hẳn nhau:
 
 | Hiện tượng | Nguyên nhân | Sửa |
@@ -155,10 +176,52 @@ Danh sách nằm ở `UNREACHABLE_BY_POLLY` trong `shared/viseme.ts` chứ khôn
 giữa dữ liệu Polly và tên animation trên skeleton. Polly ghi ra `p`, bảng đổi thành `21`, client
 phát `viseme_21`. Lệch một số là mồm đứng im mà không báo lỗi.
 
+## 4b. Khung hình: neo vào mặt, không phải vào skeleton
+
+Miệng nhép đúng mà không ai thấy thì cũng như không. Khung avatar trong hội thoại chỉ cao 220px, nên
+ôm cả người là miệng còn vài pixel.
+
+**Bẫy đã vấp.** `renderer.resize(ResizeMode.Fit, w, h)` trông như đặt được kích thước khung nhìn,
+nhưng nhánh `Fit` của runtime **bỏ qua hai tham số đó** — nó chỉ giữ lại tỉ lệ của viewport *đang*
+có. Mà viewport đang có là `new OrthoCamera(canvas.width, canvas.height)` đọc lúc dựng
+`SceneRenderer`, và thẻ `<canvas>` không đặt thuộc tính `width`/`height` nên đó là **300×150 mặc
+định của HTML**. Kết quả: khung nhìn ~150 đơn vị world trên một skeleton cao hơn 1.200 — một vệt cắt
+phóng to đặt giữa người. Đường duy nhất nói được kích thước thật là `camera.setViewport()`.
+
+**Neo vào đâu.** Không dùng bone tên `Head`: cả bốn rig đều có nó nhưng nó nằm ở world `(0,0)`, tức
+đáy skeleton — đây là rig bán thân, không phải người đầy đủ. Thay vào đó lấy AABB của những *slot*
+khớp `/face|eye|mouth|tooth|touth|tongue/i`, cùng cách `Skeleton.getBounds` làm nhưng lọc slot.
+
+Tên slot không thống nhất giữa các rig (`Robot_Face`, `Macro_Face`, `Prof_Face`, `Face`) nên đo bằng
+chính hình vẽ là cách duy nhất không phụ thuộc quy ước đặt tên. Đo bằng spine-core chạy headless:
+
+| Rig | Mặt / cả người | Mặt chiếm khung | Miệng chiếm khung |
+|---|---|---|---|
+| Leo | 47% | 77% | 14% |
+| Marco | 56% | 77% | 14% |
+| Prof | 62% | 77% | 17% |
+| Tina | 44% | 77% | 18% |
+
+Khung chốt ở **tư thế gốc, một lần**. Đo ở tư thế đang chạy thì Idle kéo đầu đi mỗi frame và khung
+nhìn sẽ trôi theo. `ResizeObserver` chỉ áp lại tỉ lệ, không đo lại.
+
+---
+
 ## 5. Chi phí
 
 Mỗi khúc AI đọc là **hai** request Polly (mp3 và speech marks trả về *thay cho nhau*, không kèm
-theo). Chạy song song nên không tốn thêm độ trễ, chỉ tốn tiền và TPS.
+theo).
+
+Hai request đó đi **nối tiếp**, và đây là ràng buộc chứ không phải lựa chọn: endpoint HTTP/2 của
+Polly báo `SETTINGS_MAX_CONCURRENT_STREAMS = 1`, mà trình duyệt thì gom cả origin vào **một** kết nối
+h2 dùng chung. Bắn hai request cùng lúc là AWS giết cả kết nối, kéo theo mọi request đang đi trên đó
+(`net::ERR_SOCKET_NOT_CONNECTED`, `net::ERR_CONNECTION_CLOSED`). Đo trong Chrome trên đúng endpoint
+này: 6 request song song hỏng 41/48, cùng 6 request đó mà nối tiếp thì hỏng 0/48. Cửa xếp hàng nằm ở
+`serial()` trong `public/src/polly-client.ts`.
+
+Cái giá là mỗi khúc tốn hai vòng mạng chứ không phải một. Đổi lại khúc N+1 vẫn được tổng hợp trong
+lúc khúc N đang **phát**, mà phát một câu thì lâu hơn nhiều so với một vòng mạng — nên chỉ khúc đầu
+tiên của mỗi lượt thực sự chậm thêm.
 
 Neural: $16 / 1M ký tự, nhân đôi vì hai request → khoảng **$0.032 / 1M ký tự thật**. Một buổi học
 10 phút AI nói chừng 3.000 ký tự ≈ **$0.0001**. Free tier neural còn 1 triệu ký tự/tháng.

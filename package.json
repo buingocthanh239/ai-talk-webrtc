@@ -9,9 +9,9 @@
   },
   "scripts": {
     "build": "node build.js",
-    "check": "tsc -p tsconfig.server.json && tsc -p tsconfig.client.json",
-    "test": "node --test server/*.test.ts shared/*.test.ts",
-    "test:s3": "docker compose --profile dev up -d minio minio-init && S3_ENDPOINT=http://localhost:9000 node --test server/*.test.ts shared/*.test.ts",
+    "check": "tsc -p tsconfig.server.json && tsc -p tsconfig.client.json && tsc -p tsconfig.client-test.json",
+    "test": "node --test server/*.test.ts shared/*.test.ts public/src/*.test.ts",
+    "test:s3": "docker compose --profile dev up -d minio minio-init && S3_ENDPOINT=http://localhost:9000 node --test server/*.test.ts shared/*.test.ts public/src/*.test.ts",
     "start": "npm run build && node --env-file-if-exists=.env server/index.ts",
     "dev": "node build.js --watch & node --watch --env-file-if-exists=.env server/index.ts"
   },

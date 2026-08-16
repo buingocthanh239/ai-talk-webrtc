@@ -25,12 +25,15 @@ import {
   AnimationStateData,
   AssetManager,
   AtlasAttachmentLoader,
+  MeshAttachment,
   Physics,
-  ResizeMode,
+  RegionAttachment,
   Skeleton,
   SkeletonBinary,
   SkeletonJson,
   SpineCanvas,
+  Utils,
+  type NumberArrayLike,
   type SpineCanvasApp,
   type TextureAtlas,
   type TrackEntry,
@@ -53,8 +56,30 @@ const TRACK_MOUTH = 1;
  */
 const MOUTH_MIX_SEC = 0.07;
 
-/** Chieu cao khung nhin theo don vi world cua skeleton. */
+/** Le chua quanh skeleton khi phai om ca nguoi (khong tim thay bone dau). */
 const VIEW_PADDING = 1.15;
+
+/**
+ * Slot nao thi tinh la "mat".
+ *
+ * KHONG dung bone ten `Head`: ca bon rig deu co bone do nhung no nam o world
+ * (0,0), tuc la day skeleton chu khong phai khop co — day la rig ban than,
+ * khong phai nguoi day du. Lay no lam moc thi khung om tron ca nguoi.
+ *
+ * Ten slot thi khong thong nhat giua cac rig (`Robot_Face`, `Macro_Face`,
+ * `Prof_Face`, `Face`), nhung deu chua mot trong cac tu duoi. Do bang chinh
+ * hinh ve la cach duy nhat khong phu thuoc vao quy uoc dat ten bone.
+ */
+const FACE_SLOT = /face|eye|mouth|tooth|touth|tongue/i;
+
+/**
+ * Khung nhin cao gap may lan khung mat.
+ *
+ * 1.0 la mat cham sat hai mep. Day len chut de con thay toc va vai — do bang
+ * spine-core tren ca bon rig thi mat chiem 44–62% chieu cao ca nguoi, nen he so
+ * nay dua khung ve khoang mot nua nguoi tro len.
+ */
+const FACE_VIEW_SCALE = 1.3;
 
 export interface AvatarBundle {
   /** `.skel` (nhi phan, nho hon) hoac `.json`. */
@@ -70,6 +95,8 @@ export class Avatar {
   #mouth: TrackEntry | null = null;
   #current: VisemeId | null = null;
   #visemeCount = 0;
+  #view: { x: number; y: number; height: number } | null = null;
+  #resizeObserver: ResizeObserver | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.#canvas = canvas;
@@ -128,6 +155,15 @@ export class Avatar {
 
     this.#skeleton = skeletonData.skeleton;
     this.#state = skeletonData.state;
+
+    // Canvas la `width:100%` nen layout doi la khung nhin sai ty le. Panel ben
+    // canh con thu vao/gian ra theo cac `<details>` quanh no, nen chuyen nay
+    // xay ra ngay trong mot buoi hoc chu khong chi luc xoay man.
+    const spine = this.#spine;
+    if (spine && typeof ResizeObserver !== 'undefined') {
+      this.#resizeObserver = new ResizeObserver(() => this.#applyCamera(spine));
+      this.#resizeObserver.observe(this.#canvas);
+    }
   }
 
   #build(canvas: SpineCanvas, bundle: AvatarBundle): { skeleton: Skeleton; state: AnimationState } {
@@ -160,20 +196,137 @@ export class Avatar {
     return { skeleton, state };
   }
 
-  /** Dat camera om lay skeleton theo kich thuoc that cua no. */
+  /**
+   * Dat camera vao MAT nhan vat.
+   *
+   * KHONG dung `renderer.resize(ResizeMode.Fit, w, h)`: nhanh Fit cua runtime
+   * bo qua hai tham so world size, no chi giu lai ty le cua viewport DANG co.
+   * Ma viewport dang co lai la `new OrthoCamera(canvas.width, canvas.height)`
+   * doc luc dung SceneRenderer — the <canvas> khong dat thuoc tinh width/height
+   * nen do la 300x150 mac dinh cua HTML. Ket qua: khung nhin ~150 don vi world
+   * tren mot skeleton cao hang nghin, tuc la mot vet cat phong to dat giua
+   * nguoi. Dat thang viewport la duong duy nhat noi duoc kich thuoc that.
+   */
   #frame(canvas: SpineCanvas, skeleton: Skeleton): void {
     skeleton.setupPose();
     skeleton.updateWorldTransform(Physics.update);
 
-    const { x, y, width, height } = skeleton.getBoundsRect();
-    const size = { x: width, y: height };
+    // Chot khung o TU THE GOC, mot lan. Do o tu the dang chay thi Idle keo dau
+    // di vai chuc don vi moi frame, va khung nhin se tro theo.
+    this.#view = this.#faceView(skeleton);
+    this.#applyCamera(canvas);
+  }
 
+  /** Ap khung da chot len camera theo ty le canvas hien tai. */
+  #applyCamera(canvas: SpineCanvas): void {
+    const view = this.#view;
+    if (!view) return;
+
+    const { width: w, height: h } = this.#syncCanvasSize(canvas);
     const camera = canvas.renderer.camera;
-    camera.position.x = x + width / 2;
-    camera.position.y = y + height / 2;
-    // Neo theo CHIEU CAO: nhan vat cao hon rong, va khung ben canh bai hoc
-    // thi hep — neo theo chieu rong se cat mat dau.
-    canvas.renderer.resize(ResizeMode.Fit, size.x * VIEW_PADDING, size.y * VIEW_PADDING);
+    camera.position.x = view.x;
+    camera.position.y = view.y;
+    // Neo theo CHIEU CAO: khung ben canh bai hoc thi hep, neo theo chieu rong
+    // se cat mat dau.
+    camera.setViewport(view.height * (w / h), view.height);
+    camera.update();
+  }
+
+  /**
+   * Vung world can lot vao khung: uu tien cai mat.
+   *
+   * Om ca skeleton thi dung ve mat ky thuat nhung sai muc dich — day la app day
+   * PHAT AM, thu nguoi hoc can nhin la cai mieng. Ca nguoi trong mot khung cao
+   * 220px thi mieng con vai pixel, nhep hay khong cung khong ai thay.
+   */
+  #faceView(skeleton: Skeleton): { x: number; y: number; height: number } {
+    const all = skeleton.getBoundsRect();
+    const whole = {
+      x: all.x + all.width / 2,
+      y: all.y + all.height / 2,
+      height: all.height * VIEW_PADDING,
+    };
+
+    const face = this.#slotBounds(skeleton, FACE_SLOT);
+    // Rig khong khop slot mat nao: om ca nguoi. Nho van hon khong thay gi.
+    if (!face || face.height < all.height * 0.05) return whole;
+
+    return {
+      x: face.x + face.width / 2,
+      y: face.y + face.height / 2,
+      height: face.height * FACE_VIEW_SCALE,
+    };
+  }
+
+  /**
+   * AABB cua rieng nhung slot khop `re`, o tu the dang duoc ve.
+   *
+   * Cung cach `Skeleton.getBounds` lam, chi khac o cho loc slot — runtime khong
+   * mo ra duong nao de gioi han pham vi cua no.
+   */
+  #slotBounds(
+    skeleton: Skeleton,
+    re: RegExp
+  ): { x: number; y: number; width: number; height: number } | null {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    const temp: number[] = new Array(2);
+
+    for (const slot of skeleton.drawOrder.appliedPose) {
+      if (!slot.bone.active || !re.test(slot.data.name)) continue;
+
+      const attachment = slot.appliedPose.attachment;
+      let vertices: NumberArrayLike | null = null;
+
+      if (attachment instanceof RegionAttachment) {
+        vertices = Utils.setArraySize(temp, 8, 0);
+        attachment.computeWorldVertices(
+          slot,
+          attachment.getOffsets(slot.appliedPose),
+          vertices,
+          0,
+          2
+        );
+      } else if (attachment instanceof MeshAttachment) {
+        const n = attachment.worldVerticesLength;
+        vertices = Utils.setArraySize(temp, n, 0);
+        attachment.computeWorldVertices(skeleton, slot, 0, n, vertices, 0, 2);
+      }
+      if (!vertices) continue;
+
+      for (let i = 0; i < vertices.length; i += 2) {
+        minX = Math.min(minX, vertices[i] ?? 0);
+        minY = Math.min(minY, vertices[i + 1] ?? 0);
+        maxX = Math.max(maxX, vertices[i] ?? 0);
+        maxY = Math.max(maxY, vertices[i + 1] ?? 0);
+      }
+    }
+
+    if (minX === Infinity) return null;
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  }
+
+  /**
+   * Backing store cua canvas = kich thuoc CSS nhan devicePixelRatio.
+   *
+   * Truoc day viec nay di kem `renderer.resize()`, chay dung MOT lan luc nap.
+   * Canvas thi `width:100%` nen doi theo layout, va man Retina thi DPR 2 — bo
+   * qua la vua nhoe vua sai ty le.
+   */
+  #syncCanvasSize(canvas: SpineCanvas): { width: number; height: number } {
+    const el = canvas.htmlCanvas;
+    const dpr = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.round(el.clientWidth * dpr));
+    const height = Math.max(1, Math.round(el.clientHeight * dpr));
+
+    if (el.width !== width || el.height !== height) {
+      el.width = width;
+      el.height = height;
+    }
+    canvas.gl.viewport(0, 0, width, height);
+    return { width, height };
   }
 
   /** So animation `viseme_N` tim thay. 0 = rig khong co khau hinh nao. */
@@ -199,11 +352,14 @@ export class Avatar {
   }
 
   dispose(): void {
+    this.#resizeObserver?.disconnect();
+    this.#resizeObserver = null;
     this.#spine?.dispose();
     this.#spine = null;
     this.#skeleton = null;
     this.#state = null;
     this.#mouth = null;
     this.#current = null;
+    this.#view = null;
   }
 }

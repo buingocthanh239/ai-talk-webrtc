@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    // Test cua client can CA HAI: DOM vi code duoc test la code trinh duyet,
+    // va node vi test chay bang `node --test`. Khong config nao co san co ca
+    // hai — tsconfig.client co DOM nhung khong co node va co y loai *.test.ts,
+    // con tsconfig.server co node nhung co y khong co DOM.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": ["public/src/**/*.test.ts"]
+}

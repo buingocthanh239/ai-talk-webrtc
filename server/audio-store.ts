@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { AUDIO_DIR } from './db.ts';
 import type { Role } from '../shared/types.ts';
 import { presignGet, presignPost, s3ConfigFromEnv, type UploadGrant } from './s3.ts';
-import { cdnConfigFromEnv, cdnUrl, signedCookies, signedUrl } from './cdn.ts';
+import { canSign, cdnConfigFromEnv, cdnUrl, signedCookies, signedUrl } from './cdn.ts';
 
 export type AudioStore = 'disk' | 's3';
 
@@ -35,6 +35,16 @@ const PLAYBACK_TTL_MS = 60 * 60 * 1000;
 if (s3 && !cdn) {
   console.warn(
     '  [audio] AUDIO_STORE=s3 nhung khong co CDN_DOMAIN — se phat lai bang presigned GET.'
+  );
+}
+
+// Che do public khong sai, nhung no la thu duy nhat o day khong co han su dung:
+// URL phat ra song mai. Mot dong log de no la mot lua chon nhin thay duoc chu
+// khong phai mot mac dinh am tham.
+if (cdn && !canSign(cdn)) {
+  console.warn(
+    '  [audio] CDN_DOMAIN khong kem key pair — phat lai bang URL tran, khong han.\n' +
+      '          Distribution phai dang public thi nguoi hoc moi nghe duoc.'
   );
 }
 
@@ -117,6 +127,10 @@ export async function readAudio(store: AudioStore, path: string): Promise<Buffer
  *
  * `signed = true` (client khong dung cookie duoc, vd mobile) thi ky thang vao
  * URL; con lai tra URL tran va dua chu ky qua cookie o `playbackCookies`.
+ *
+ * Distribution public thi ca hai duong ve chung mot cho: URL tran. Mobile xin
+ * `signed` cung nhan URL tran chu khong phai loi — voi no thi day van la mot
+ * URL phat duoc, va do moi la thu no can.
  */
 export function playbackUrl(
   store: AudioStore,
@@ -125,18 +139,21 @@ export function playbackUrl(
   at: number = Date.now()
 ): string {
   if (store === 'disk') return `/audio/${path}`;
-  if (cdn) return signed ? signedUrl(cdn, path, at + PLAYBACK_TTL_MS) : cdnUrl(cdn, path);
+  if (cdn) {
+    return signed && canSign(cdn) ? signedUrl(cdn, path, at + PLAYBACK_TTL_MS) : cdnUrl(cdn, path);
+  }
   // Khong dung CDN thi van phat duoc, chi la moi URL mot chu ky rieng.
   if (!s3) throw new Error(`Message tro toi S3 nhung AUDIO_STORE khong phai s3: ${path}`);
   return presignGet(s3, path, Math.floor(PLAYBACK_TTL_MS / 1000), at);
 }
 
 /**
- * Header Set-Cookie cho quyen nghe lai ca buoi. Rong khi khong dung CDN hoac
- * dang chay bang disk.
+ * Header Set-Cookie cho quyen nghe lai ca buoi. Rong khi khong dung CDN, dang
+ * chay bang disk, hoac distribution public — cai cuoi khong co gi de ky, va
+ * gui ba cookie vo nghia sang trinh duyet thi chi to them nhieu.
  */
 export function playbackCookies(sessionId: string, at: number = Date.now()): string[] {
-  if (!cdn || activeStore !== 's3') return [];
+  if (!cdn || !canSign(cdn) || activeStore !== 's3') return [];
   const { cookies, path } = signedCookies(cdn, sessionId, at + PLAYBACK_TTL_MS);
   const maxAge = Math.floor(PLAYBACK_TTL_MS / 1000);
   return cookies.map(

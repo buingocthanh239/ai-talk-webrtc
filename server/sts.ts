@@ -1,21 +1,29 @@
 /**
- * STS AssumeRole — cap credential tam de CLIENT tu goi Polly.
+ * Credential cho CLIENT tu goi Polly.
  *
  * Vi sao khong de server goi Polly ho: moi cau AI noi deu phai tong hop, va
  * khuc DAU TIEN cua moi luot la toan bo do tre nguoi dung cam thay. Mot vong
  * round trip qua backend nam dung tren duong nong do. Client cam credential
  * thi goi thang AWS, va cat khuc nho tuy y ma khong ton them vong nao.
  *
- * Doi lai credential nam trong browser. Hai thu keo rui ro xuong:
+ * Dieu do co nghia credential phai xuong toi browser. Co HAI duong, chon bang
+ * viec co dat POLLY_STS_ROLE_ARN hay khong:
  *
- *   1. Session policy rang vao IP cua chinh client (`aws:SourceIp`). Credential
- *      bi lay di chi dung duoc tu dung may do.
- *   2. `DateLessThan` cat han su dung xuong duoi SAN 900 giay cua AssumeRole —
- *      AWS khong cho DurationSeconds ngan hon 15 phut, nhung session policy thi
- *      cat tuy y.
+ *   STS (co role ARN) — AssumeRole ra credential tam. Hai thu keo rui ro xuong:
  *
- * Session policy GIAO voi policy cua role chu khong cong vao: role phai da cho
- * `polly:SynthesizeSpeech` san, cho nay chi thu hep them.
+ *     1. Session policy rang vao IP cua chinh client (`aws:SourceIp`).
+ *        Credential bi lay di chi dung duoc tu dung may do.
+ *     2. `DateLessThan` cat han su dung xuong duoi SAN 900 giay cua AssumeRole
+ *        — AWS khong cho DurationSeconds ngan hon 15 phut, nhung session policy
+ *        thi cat tuy y.
+ *
+ *     Session policy GIAO voi policy cua role chu khong cong vao: role phai da
+ *     cho `polly:SynthesizeSpeech` san, cho nay chi thu hep them.
+ *
+ *   THANG (khong co role ARN) — dua chinh credential cua backend xuong browser.
+ *     Khong dung duoc mot rao nao o tren: khong han that, khong rang IP, va
+ *     mang du quyen cua IAM user do chu khong rieng Polly. Duong nay chi danh
+ *     cho demo, va no tu bao ra log moi lan khoi dong.
  *
  * Ky SigV4 bang chinh signingKey cua `s3.ts`, chi khac `service` — giong het
  * cach `polly.ts` lam. Van khong keo @aws-sdk ve.
@@ -36,15 +44,21 @@ const MIN_TTL_SEC = 900;
 /** Tran mac dinh cua MaxSessionDuration tren mot IAM role moi tao. */
 const MAX_TTL_SEC = 3600;
 
-export interface StsConfig {
+export interface CredsConfig {
   region: string;
   accessKeyId: string;
   secretAccessKey: string;
   sessionToken?: string;
-  roleArn: string;
+  /** Vang mat = duong THANG: credential cua backend di thang xuong browser. */
+  roleArn?: string;
   ttlSec: number;
   bindIp: boolean;
 }
+
+/** CredsConfig da co role. Kieu nay la dieu kien de goi assumeRole. */
+export type StsConfig = CredsConfig & { roleArn: string };
+
+export const usesSts = (cfg: CredsConfig): cfg is StsConfig => Boolean(cfg.roleArn);
 
 /**
  * Quyen goi Polly cap cho client, mot lan cho ca buoi hoc.
@@ -55,39 +69,51 @@ export interface StsConfig {
 export interface TempCredentials {
   accessKeyId: string;
   secretAccessKey: string;
-  sessionToken: string;
+  /** Vang mat o duong THANG — credential dai han khong co token nao. */
+  sessionToken?: string;
   expiresAt: number;
 }
 
 /**
- * Doc cau hinh tu env. null = chua bat, hoi thoai se khong co tieng noi cua AI
- * (client bao ra man hinh, giong cach drill bao `enabled:false`).
+ * Doc cau hinh tu env. null = khong co credential nao, hoi thoai se khong co
+ * tieng noi cua AI (client bao ra man hinh, giong cach drill bao `enabled:false`).
  *
- * Dung lai credential AWS cua S3/Polly: van mot tai khoan, khong co ly do bat
- * nguoi cau hinh khai lan thu ba.
+ * Nhan `PollyConfig` thay vi tu doc lai POLLY_REGION/S3_REGION: goi duoc ham
+ * nay nghia la POLLY=on va region da duoc `polly.ts` chot, khong co ly do giai
+ * lai cung mot bai toan o hai cho roi cho chung le nhau.
+ *
+ * Dung lai credential AWS cua S3: van mot tai khoan, khong co ly do bat nguoi
+ * cau hinh khai lan thu ba.
  */
-export function stsConfigFromEnv(env = process.env): StsConfig | null {
+export function pollyCredsFromEnv(polly: PollyConfig, env = process.env): CredsConfig | null {
   const roleArn = env.POLLY_STS_ROLE_ARN ?? '';
-  if (!roleArn) return null;
+  const accessKeyId = env.AWS_ACCESS_KEY_ID ?? '';
+  const secretAccessKey = env.AWS_SECRET_ACCESS_KEY ?? '';
 
-  const cfg: StsConfig = {
-    region: env.POLLY_REGION ?? env.S3_REGION ?? '',
-    accessKeyId: env.AWS_ACCESS_KEY_ID ?? '',
-    secretAccessKey: env.AWS_SECRET_ACCESS_KEY ?? '',
+  if (!accessKeyId || !secretAccessKey) {
+    // Dat role ARN la da noi ro y dinh, nen thieu credential de dong vai la
+    // loi cau hinh chu khong phai "thoi khong bat nua".
+    if (roleArn) {
+      throw new Error(
+        'POLLY_STS_ROLE_ARN da dat nhung thieu AWS_ACCESS_KEY_ID / ' +
+          'AWS_SECRET_ACCESS_KEY. Xem .env.example.'
+      );
+    }
+    return null;
+  }
+
+  return {
+    region: polly.region,
+    accessKeyId,
+    secretAccessKey,
     ...(env.AWS_SESSION_TOKEN ? { sessionToken: env.AWS_SESSION_TOKEN } : {}),
-    roleArn,
+    ...(roleArn ? { roleArn } : {}),
     ttlSec: Math.min(
       MAX_TTL_SEC,
       Math.max(MIN_TTL_SEC, Number(env.POLLY_STS_TTL_SEC) || MAX_TTL_SEC)
     ),
     bindIp: (env.POLLY_STS_BIND_IP ?? 'on') === 'on',
   };
-
-  const missing = (['region', 'accessKeyId', 'secretAccessKey'] as const).filter((k) => !cfg[k]);
-  if (missing.length) {
-    throw new Error(`POLLY_STS_ROLE_ARN da dat nhung thieu: ${missing.join(', ')}. Xem .env.example.`);
-  }
-  return cfg;
 }
 
 // ------------------------------------------------------------------ policy
@@ -269,24 +295,41 @@ export interface PollyGrantShape {
   region: string;
   accessKeyId: string;
   secretAccessKey: string;
-  sessionToken: string;
+  sessionToken?: string;
   expiresAt: number;
   voiceId: string;
   engine: PollyEngine;
 }
 
 /**
- * Quyen goi Polly hoan chinh cho client: credential tam cong voi giong/engine
- * mac dinh. Nguoi hoc doi giong duoc o phia client, nen day chi la diem xuat
- * phat chu khong phai rang buoc.
+ * Credential cua chinh backend, khong qua STS.
+ *
+ * `expiresAt` o day la mot han BIA: credential dai han khong het han bao gio.
+ * Van dat no de client giu nguyen vong xin lai theo `grantUsable()` — xin lai
+ * chi nhan ve dung cai cu, khong hong gi. Noi that ra thi giu nguyen vong do
+ * re hon la mo mot nhanh rieng trong client cho mot che do chi dung de demo.
+ */
+function directCreds(cfg: CredsConfig, at: number): TempCredentials {
+  return {
+    accessKeyId: cfg.accessKeyId,
+    secretAccessKey: cfg.secretAccessKey,
+    ...(cfg.sessionToken ? { sessionToken: cfg.sessionToken } : {}),
+    expiresAt: at + cfg.ttlSec * 1000,
+  };
+}
+
+/**
+ * Quyen goi Polly hoan chinh cho client: credential cong voi giong/engine mac
+ * dinh. Nguoi hoc doi giong duoc o phia client, nen day chi la diem xuat phat
+ * chu khong phai rang buoc.
  */
 export async function pollyGrant(
   polly: PollyConfig,
-  sts: StsConfig,
+  cfg: CredsConfig,
   opts: { sessionName: string; sourceIp: string | null },
   at: number = Date.now()
 ): Promise<PollyGrantShape> {
-  const creds = await assumeRole(sts, opts, at);
+  const creds = usesSts(cfg) ? await assumeRole(cfg, opts, at) : directCreds(cfg, at);
   return {
     region: polly.region,
     ...creds,

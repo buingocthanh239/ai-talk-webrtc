@@ -165,12 +165,18 @@ Lý do từng loại phương án này (*"mất cơ chế ngắt lời tự nhi�
 tiên của mỗi lượt — các khúc sau được đọc trong lúc khúc trước đang phát nên không lộ ra. Một vòng
 round trip qua backend nằm đúng trên đường nóng đó, và cắt khúc càng nhỏ thì càng tốn nhiều vòng.
 
-Backend chỉ `AssumeRole` một lần cho cả buổi rồi đưa credential tạm cho client:
+Credential vì thế phải xuống tới browser. Hai đường, chọn bằng `POLLY_STS_ROLE_ARN`:
+
+**Có role (production).** Backend `AssumeRole` một lần cho cả buổi rồi đưa credential tạm cho client:
 
 - session policy chỉ cho `polly:SynthesizeSpeech`, ràng vào **IP của chính client**
   (`aws:SourceIp`) và có `DateLessThan` cứng
 - `DateLessThan` cắt được hạn xuống dưới sàn 900 giây của `AssumeRole`
 - đổi Wi-Fi ↔ 4G là 403 → client xin lại qua `POST /api/sessions/:id/polly`
+
+**Không role (demo).** Khoá AWS của backend đi thẳng xuống browser — không hạn thật, không ràng IP,
+mang đủ quyền của IAM user đó. Dựng nhanh, không phải tạo role; server báo một dòng log mỗi lần khởi
+động để đây là lựa chọn nhìn thấy được. Chi tiết: [`docs/env.md`](docs/env.md) mục 3.2.
 
 **Đổi lại được gì trong code:** bỏ audio output của Realtime cũng xoá luôn `TrackRecorder` cho
 remote track, vòng dò im lặng 300ms/12s để *đoán* khi nào AI nói xong, và trần an toàn đi kèm.
@@ -264,6 +270,9 @@ bốn, tức là xoá sạch cái khiến chúng khác nhau. Đổi giọng mộ
 
 ## Cấu hình
 
+Bảng dưới là tra nhanh. Cách đặt env vào từng nơi (local / Docker / ECS), policy IAM cho Polly, và
+các bẫy đã gặp: [`docs/env.md`](docs/env.md).
+
 | Biến | Mặc định | Ghi chú |
 |---|---|---|
 | `OPENAI_API_KEY` | — | bắt buộc |
@@ -278,16 +287,16 @@ bốn, tức là xoá sạch cái khiến chúng khác nhau. Đổi giọng mộ
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | nt. Dùng chung cho S3, Polly và STS |
 | `AWS_SESSION_TOKEN` | — | chỉ khi chạy bằng credential tạm (IAM role trên EC2/ECS) |
 | `S3_ENDPOINT` | — | chỉ khi dev với MinIO; có giá trị = dùng path-style URL |
-| `CDN_DOMAIN` | — | để trống thì phát lại bằng presigned GET |
-| `CF_KEY_PAIR_ID` | — | bắt buộc khi có `CDN_DOMAIN` |
-| `CF_PRIVATE_KEY` / `CF_PRIVATE_KEY_PATH` | — | đặt **một** trong hai; `CF_PRIVATE_KEY` được ưu tiên |
+| `CDN_DOMAIN` | — | để trống thì phát lại bằng presigned GET. Đứng một mình = distribution public, URL trần không hạn |
+| `CF_KEY_PAIR_ID` | — | chỉ khi distribution có ký. Đặt nửa key pair thì server ngã ra lúc khởi động |
+| `CF_PRIVATE_KEY` / `CF_PRIVATE_KEY_PATH` | — | nt. Đặt **một** trong hai; `CF_PRIVATE_KEY` được ưu tiên |
 | `POLLY` | `off` | `on` = AI có tiếng nói. Tắt thì AI chỉ hiện chữ |
 | `POLLY_REGION` | theo `S3_REGION` | bucket và Polly không bắt buộc cùng vùng |
 | `POLLY_VOICE` | `Joanna` | chỉ là phương án cuối; giọng thật lấy từ file nhân vật |
 | `POLLY_ENGINE` | `neural` | `standard` \| `neural` \| `long-form`. **Không** dùng được `generative` |
-| `POLLY_STS_ROLE_ARN` | — | để trống = AI **không nói được** trong hội thoại (vẫn hiện chữ). Role chỉ nên cho `polly:SynthesizeSpeech` |
-| `POLLY_STS_TTL_SEC` | `3600` | hạn credential tạm; AWS chặn trong 900..3600 |
-| `POLLY_STS_BIND_IP` | `on` | ràng credential vào IP client. Tắt khi sau reverse proxy không đặt `X-Forwarded-For` |
+| `POLLY_STS_ROLE_ARN` | — | để trống = **đường thẳng**: khoá AWS của backend đi thẳng xuống browser (demo). Có role = credential tạm qua STS, chỉ cho `polly:SynthesizeSpeech` |
+| `POLLY_STS_TTL_SEC` | `3600` | hạn credential tạm; AWS chặn trong 900..3600. Ở đường thẳng chỉ là hạn bịa |
+| `POLLY_STS_BIND_IP` | `on` | ràng credential vào IP client. Tắt khi sau reverse proxy không đặt `X-Forwarded-For`. Không có tác dụng ở đường thẳng |
 
 Polly dùng chung `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` với S3 — cùng một tài khoản AWS,
 không bắt khai hai lần.

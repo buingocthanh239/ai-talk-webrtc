@@ -206,7 +206,11 @@ export interface PollyGrant {
   region: string;
   accessKeyId: string;
   secretAccessKey: string;
-  sessionToken: string;
+  /**
+   * Vang mat khi backend dua thang credential dai han cua no xuong (khong qua
+   * STS). Duong do chi danh cho demo — xem `server/sts.ts`.
+   */
+  sessionToken?: string;
   expiresAt: number;
   /** Giong mac dinh. Nguoi hoc doi duoc o phia client. */
   voiceId: string;

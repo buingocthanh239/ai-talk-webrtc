@@ -14,6 +14,7 @@
  */
 
 import { SentenceChunker } from '../../shared/chunk.ts';
+import { waitForPlayback, type PlaybackWait } from '../../shared/playback.ts';
 import { grantUsable, PollyError, synthesize } from './polly-client.ts';
 import type { SynthesisResult } from './polly-client.ts';
 import type { PollyEngine, PollyGrant } from '../../shared/types.ts';
@@ -93,6 +94,9 @@ export class SpeechQueue {
   #waiters: (() => void)[] = [];
 
   #failsafe: ReturnType<typeof setTimeout> | null = null;
+
+  /** Lan cho cua khuc dang phat. `cancel()` dung no de go treo. */
+  #playback: PlaybackWait | null = null;
 
   constructor(audio: HTMLAudioElement, handlers: SpeechQueueHandlers) {
     this.#audio = audio;
@@ -176,6 +180,12 @@ export class SpeechQueue {
     this.#audio.pause();
     this.#audio.removeAttribute('src');
     this.#audio.load();
+
+    // Go src ra khong ban `ended`, nen vong phat dang `await` phai duoc danh
+    // thuc tu day. Truoc kia viec nay nho vao `emptied`, va chinh cho do lam
+    // moi lan gan src bi hieu nham la "phat xong".
+    this.#playback?.finish();
+    this.#playback = null;
 
     const jobs = this.#jobs;
     this.#jobs = [];
@@ -306,27 +316,26 @@ export class SpeechQueue {
     audio.playbackRate = this.#rate;
     this.#on.onChunk(result.frames);
 
-    // `emptied` phai co trong danh sach: `cancel()` goi removeAttribute('src')
-    // + load(), thao tac do KHONG phat ra `ended`. Thieu no thi promise nay
-    // khong bao gio resolve va vong phat treo lai vinh vien.
-    const done = new Promise<void>((resolve) => {
-      const events = ['ended', 'error', 'emptied'] as const;
-      const finish = (): void => {
-        for (const e of events) audio.removeEventListener(e, finish);
-        resolve();
-      };
-      for (const e of events) audio.addEventListener(e, finish);
-    });
+    // Chi nghe `ended`/`error`. Duong huy khong muon su kien nao lam tin ma
+    // duoc `cancel()` goi thang — xem `shared/playback.ts` de biet vi sao
+    // nghe `emptied` o day tung lam mat tieng.
+    const wait = waitForPlayback(audio);
+    this.#playback = wait;
 
     try {
-      await audio.play();
-    } catch (err) {
-      // Trinh duyet chan tu dong phat. Khong nen xay ra vi nguoi hoc vua bam
-      // nut micro, nhung neu co thi bo qua khuc nay con hon treo hang doi.
-      this.#on.onError(err instanceof Error ? err.message : String(err));
-      return;
+      try {
+        await audio.play();
+      } catch (err) {
+        // Trinh duyet chan tu dong phat. Khong nen xay ra vi nguoi hoc vua bam
+        // nut micro, nhung neu co thi bo qua khuc nay con hon treo hang doi.
+        this.#on.onError(err instanceof Error ? err.message : String(err));
+        return;
+      }
+      await wait.done;
+    } finally {
+      wait.finish();
+      if (this.#playback === wait) this.#playback = null;
     }
-    await done;
   }
 
   #finish(): void {
