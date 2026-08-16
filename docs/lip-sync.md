@@ -1,10 +1,12 @@
-# Khẩu hình — viseme từ Amazon Polly, avatar 3D
+# Khẩu hình — viseme từ Amazon Polly, avatar Spine 2D
 
 Tài liệu này mô tả cách avatar nhép mồm theo lời AI **ngay trong hội thoại**.
 
 Bám sát code hiện tại: `shared/viseme.ts`, `shared/chunk.ts`, `public/src/polly-client.ts`,
 `public/src/speech-queue.ts`, `public/src/talk-avatar.ts`, `public/src/viseme-player.ts`,
-`public/src/avatar.ts`.
+`public/src/avatar.ts`, `server/characters/*.json`.
+
+Avatar là **Spine 2D** (`@esotericsoftware/spine-webgl`), không phải mô hình 3D.
 
 > **Từng có một màn "luyện khẩu hình" riêng, nay đã bỏ.** Nó tồn tại vì hội thoại không thể có
 > khẩu hình — xem [mục 1](#1-ràng-buộc-gốc-và-cách-gỡ). Khi hội thoại có rồi thì một màn riêng đọc
@@ -37,27 +39,34 @@ Luồng đầy đủ của một lượt nói: [`ai-talk-flow.md`](ai-talk-flow.
 
 ```
 Polly (client tự ký)     →  timeline viseme đúng âm vị
-  shared/viseme.ts       →  map 17 viseme Polly → 15 viseme Oculus
+  shared/viseme.ts       →  map 18 nhãn Polly → 17 trong bộ 22 ID của rig
 speech-queue.ts          →  khúc nào đang phát, nạp timeline của khúc đó
-viseme-player.ts         →  timeline + audio.currentTime → trọng số 0..1
-avatar.ts                →  trọng số → morphTargetInfluences
+viseme-player.ts         →  timeline + audio.currentTime → 2 đầu ra:
+                            · khẩu hình đang mở (rời rạc) → avatar
+                            · bảng trọng số (liên tục)    → thanh đo
+avatar.ts                →  setAnimation(track 1, `viseme_N`), Spine tự mix
 ```
 
-`viseme-player.ts` **không biết gì về three.js hay DOM** — nó chỉ trả ra một bảng trọng số. Nhờ vậy
-thanh đo debug và avatar 3D dùng chung đúng một nguồn.
+**Hai track là bắt buộc.** `Idle*` và `Blink` chạy track 0, viseme track 1 — vì `Idle` cũng animate
+chính `Mouth1..Mouth8`. Nhét chung một track thì miệng vừa nhép vừa bị Idle kéo.
 
-> **15 thanh đo viseme luôn chạy**, kể cả khi không cấu hình `AVATAR_URL` (gập trong `<details>`
-> cạnh avatar). Khi mồm avatar đứng im, đây là cách nhanh nhất để biết lỗi ở tầng nào: thanh đo
-> nhảy mà mồm đứng im → lỗi ở model/morph target. Thanh đo cũng đứng im → lỗi ở dữ liệu hoặc
-> timeline.
+`viseme-player.ts` **không biết gì về Spine hay DOM** — nó chỉ trả ra khẩu hình đang mở và một bảng
+trọng số. Nhờ vậy thanh đo debug và avatar đọc chung đúng một nguồn.
+
+> **22 thanh đo viseme luôn chạy**, kể cả khi nhân vật chưa có asset (gập trong `<details>` cạnh
+> avatar). Khi mồm avatar đứng im, đây là cách nhanh nhất để biết lỗi ở tầng nào: thanh đo nhảy mà
+> mồm đứng im → lỗi ở rig hoặc runtime. Thanh đo cũng đứng im → lỗi ở dữ liệu hoặc timeline.
+>
+> Năm thanh bị làm mờ là năm khẩu hình Polly không bao giờ gọi tới (mục 4) — để không ai mất buổi
+> chiều đi tìm xem vì sao chúng đứng im.
 
 Ba trường hợp hỏng của avatar được báo **khác nhau**, vì cách sửa khác hẳn nhau:
 
 | Hiện tượng | Nguyên nhân | Sửa |
 |---|---|---|
-| "Chưa cấu hình AVATAR_URL" | thiếu env | đặt `AVATAR_URL` |
-| "Không tải được avatar: …" | URL sai / mạng / CORS | kiểm tra URL |
-| "Model tải được nhưng không có morph target viseme nào" | thiếu `?morphTargets=Oculus Visemes` | tải lại `.glb` kèm tham số |
+| "Nhân vật này chưa có avatar" | `avatar: null` trong file nhân vật | trỏ `skeleton` + `atlas` vào asset |
+| "Không tải được avatar: …" | sai đường dẫn, hoặc runtime lệch phiên bản với bản export | kiểm tra `/character/...` và phiên bản Spine |
+| "Skeleton tải được nhưng không có animation viseme_N nào" | export thiếu animation khẩu hình | export lại từ Spine |
 
 ---
 
@@ -83,7 +92,7 @@ sequenceDiagram
         Note right of VP: Timeline Polly là các mốc RỜI RẠC.<br/>Một viseme giữ cho tới mốc kế tiếp;<br/>70ms cuối thì chéo dần sang viseme sau.
         VP->>VP: w += (target − w) × (1 − e^(−dt/45ms))
         Note right of VP: Lọc theo dt THẬT, không theo số frame:<br/>máy yếu tụt fps thì tốc độ làm mượt<br/>vẫn y nguyên.
-        VP->>Av: apply(weights)
+        VP->>Av: playViseme(id) khi id ĐỔI
     end
 ```
 
@@ -94,48 +103,57 @@ học dừng lại, mồm vẫn giữ đúng khẩu hình của mốc đó chứ
 từ trước đó. Nhảy tức thời giữa các viseme nhìn ra ngay là máy, và với người đang tập bắt chước thì
 còn dạy sai cả cách chuyển âm.
 
+Với avatar, việc mix đó **giao cho Spine** (`AnimationStateData.defaultMix`) chứ không tự nội suy:
+Spine nội suy trên chính các bone, còn ta chỉ nội suy được một con số. Bảng trọng số 70ms ở trên
+giờ chỉ phục vụ thanh đo.
+
 **Dòng gợi ý tiếng Việt đọc từ timeline, không đọc từ bảng trọng số đã làm mượt.** Giữa hai khẩu
 hình, trọng số bị chia đôi nên không cái nào vượt ngưỡng, và dòng chữ sẽ nháy về "Miệng nghỉ" một
 cái — đúng lúc người học đang đọc nó.
 
 ---
 
-## 4. Bảng map Polly → Oculus
+## 4. Bảng map Polly → viseme ID của rig
 
-Polly trả bộ viseme của nó (17 giá trị + `sil`, theo IPA). Avatar Ready Player Me nhận bộ Oculus
-OVR LipSync (15 morph target, tên có tiền tố `viseme_`).
+Rig dùng bộ **22 ID (0–21)** — chính là bảng viseme của Azure Speech. Hoạ sĩ vẽ theo bảng đó.
+Polly thì dùng bộ nhãn riêng, **thô hơn**, nên ở giữa phải có một bảng đổi:
 
-| Polly | Âm | → Oculus |
+| Polly | Âm | → ID | Polly | Âm | → ID |
+|---|---|---|---|---|---|
+| `sil` | — | 0 | `r` | ɹ | 13 |
+| `@` | ə, ɚ | 1 | `l` | l | 14 |
+| `a` | æ, ɑ, aɪ, aʊ | 2 | `s` | s, z | 15 |
+| `O` | ɔ, ɔɪ | 3 | `S` | ʃ, tʃ, dʒ, ʒ | 16 |
+| `E` / `e` | ɛ,ʌ,ɜ / eɪ | 4 | `T` | θ, ð | 17 |
+| `i` | i, ɪ, j | 6 | `f` | f, v | 18 |
+| `u` | u, ʊ, w | 7 | `t` | d, n, t | 19 |
+| `o` | oʊ | 8 | `k` | g, h, k, ŋ | 20 |
+| | | | `p` | b, m, p | 21 |
+
+**`T` cho về 17 chứ không phải 19**, dù Azure xếp θ vào 19: 17 là hình lưỡi thò ra giữa hai răng,
+và đó đúng là thứ người học cần *nhìn thấy*. Với app dạy phát âm, chọn hình dễ thấy quan trọng hơn
+khớp bảng.
+
+### Năm khẩu hình Polly không bao giờ gọi tới
+
+| ID | IPA | Vì sao |
 |---|---|---|
-| `p` | b, m, p | `PP` |
-| `f` | f, v | `FF` |
-| `T` | θ, ð | `TH` |
-| `t` | d, n, t | `DD` |
-| `k` | g, h, k, ŋ | `kk` |
-| `S` | ʃ, tʃ, dʒ, ʒ | `CH` |
-| `s` | s, z | `SS` |
-| `l` | l | `nn` |
-| `r` | ɹ | `RR` |
-| `a` | æ, ɑ, aɪ, aʊ | `aa` |
-| `e` / `E` | eɪ / ɛ, ʌ, ɜ | `E` *(gộp)* |
-| `i` | i, ɪ, j | `I` |
-| `o` / `O` | oʊ / ɔ, ɔɪ | `O` *(gộp)* |
-| `u` | u, ʊ, w | `U` |
-| `@` | ə, ɚ | `E` ở trọng số 0.55 |
-| `sil` | — | `sil` |
+| 5 | `ɝ` | Polly gộp vào `@` cùng schwa |
+| 9 | `aʊ` | gộp vào `a` |
+| 10 | `ɔɪ` | gộp vào `O` |
+| 11 | `aɪ` | gộp vào `a` |
+| 12 | `h` | gộp vào `k` |
 
-**Hai chỗ gộp (`e`/`E`, `o`/`O`) là giới hạn của rig, không phải của Polly** — Polly phân biệt được,
-RPM không có morph target riêng.
+Ba trong số đó là nguyên âm đôi — thứ người Việt học tiếng Anh hay nuốt mất. **Đây là cái giá đã
+biết trước khi chọn Polly**, không phải bug. Đổi sang Azure thì cả bảng đổi ở trên biến mất và 22
+hình đều sống.
 
-**Schwa (`@`) bị hạ trọng số xuống 0.55** vì nó là nguyên âm giảm, miệng chỉ hé ra. Cho nó trọng số
-đầy như `E` thì avatar nhai quá mạnh ở các âm tiết không nhấn — nhìn ra ngay là sai.
+Danh sách nằm ở `UNREACHABLE_BY_POLLY` trong `shared/viseme.ts` chứ không chỉ trong tài liệu — thanh
+đo debug đọc từ đó để làm mờ, và có một test khoá nó với bảng map để hai thứ không lệch nhau.
 
-Bảng map nằm ở `shared/viseme.ts` chứ không ở một trong hai phía. Client là nơi duy nhất gọi Polly
-bây giờ, nhưng `parseSpeechMarks` và bảng map vẫn ở `shared/` vì chúng là **hợp đồng giữa dữ liệu
-Polly và tên morph target trên mesh**: Polly ghi ra `p`, bảng đổi thành `PP`, client tra
-`viseme_PP`. Lệch một ký tự là mồm đứng im mà không báo lỗi.
-
----
+**Bảng map nằm ở `shared/` chứ không ở client**, dù bây giờ chỉ client gọi Polly: nó là hợp đồng
+giữa dữ liệu Polly và tên animation trên skeleton. Polly ghi ra `p`, bảng đổi thành `21`, client
+phát `viseme_21`. Lệch một số là mồm đứng im mà không báo lỗi.
 
 ## 5. Chi phí
 
@@ -160,6 +178,7 @@ hội thoại sinh ra lúc chạy nên gần như không bao giờ trùng — ca
 | **Forced alignment hậu kỳ (MFA)** | Chính xác nhưng không live, và MFA cần Python/Kaldi trong container riêng. Không còn cần tới |
 | **Azure Speech thay vì Polly** | Tương đương về tính năng (`visemeReceived` + blendshape stream). Chọn Polly vì repo **đã** ký SigV4 bằng `node:crypto` trong `server/s3.ts` và **đã** có credential AWS trong `.env`. Azure là thêm vendor, credential và SDK mới |
 | **Giữ audio của Realtime, avatar chỉ nhép trong màn luyện riêng** | Chính là kiến trúc cũ. Bỏ vì nó bắt nuôi hai đường Polly, và giọng ở hai màn có thể lệch nhau — cùng một app dạy bắt chước một người nói mẫu mà lại hai giọng |
+| **Đổi sang Azure Speech cho khớp rig** | Rig được vẽ theo đúng bảng 22 viseme của Azure, và `VisemeReceived` trả thẳng ID + mốc thời gian nên bỏ được cả bảng đổi lẫn năm khẩu hình chết. Đã cân nhắc và **chọn ở lại Polly**: toàn bộ đường TTS, ký SigV4 và STS đã dựng xong cho AWS, đổi vendor là viết lại từ đầu |
 | **Backend gọi Polly hộ client** | Khúc đầu tiên của mỗi lượt là toàn bộ độ trễ người dùng cảm thấy, và một vòng round trip qua backend nằm đúng trên đường nóng đó. Cắt khúc càng nhỏ để giảm độ trễ thì càng tốn nhiều vòng |
 
 **Cái giá đã trả cho việc đổi:** mất prosody của giọng Realtime. Polly neural phẳng hơn rõ.
@@ -168,16 +187,20 @@ hội thoại sinh ra lúc chạy nên gần như không bao giờ trùng — ca
 
 ## 7. Giới hạn đã biết
 
-**Rig không có lưỡi.** Với người Việt học tiếng Anh, những phân biệt khó nhất lại nằm ở lưỡi:
-θ/ð (lưỡi giữa hai răng), l vs n, âm r. Avatar RPM không có lưỡi; morph target gần như chỉ có môi
-và hàm, nên `TH` chỉ ra được một xấp xỉ môi/hàm. **Polly cho dữ liệu đúng nhưng rig không diễn ra
-được.**
+**Rig CÓ lưỡi và răng** — giới hạn cũ đã hết. Bốn skeleton đều có slot `Tongue`, `Tooth_U`,
+`Tooth_B`, `ToothU_Shadow`. Với người Việt học tiếng Anh, những phân biệt khó nhất nằm đúng ở lưỡi
+(θ/ð, l vs n, âm r), và bộ rig này diễn được. Dòng `VISEME_HINT_VI` trong `shared/viseme.ts` vì thế
+đổi vai: từ chỗ *thay thế* thành chỗ *xác nhận* — người học đọc để biết mình đang nhìn đúng chỗ.
 
-Bù tạm bằng `VISEME_HINT_VI` trong `shared/viseme.ts`: mỗi khẩu hình kèm một dòng tiếng Việt nói
-thẳng vị trí lưỡi, ví dụ `TH: Dau luoi tho ra GIUA HAI RANG — cho de luoi sau rang`. Đây là bù đắp,
-không phải giải pháp. Muốn giải thật thì đổi sang model có morph lưỡi (hoặc thêm sơ đồ cắt dọc
-khoang miệng bên cạnh avatar) — và việc đó **không đụng tới tầng dữ liệu**, vì bảng trọng số vẫn y
-nguyên.
+**Các animation viseme không key cùng một bộ bone.** Leo `viseme_0` key `Mouth` và `Mouth2..8` nhưng
+thiếu `Mouth1`; Marco `viseme_0` thiếu `Mouth2` và `Mouth6`. Bone không được key ở track 1 sẽ rơi về
+track 0 (`Idle`, vốn cũng animate `Mouth1..8`), nên đổi khẩu hình có thể thấy bone giật nhẹ. **Sửa
+thật nằm ở file Spine**: key đủ cả 8 bone miệng trong cả 22 animation.
+
+**Runtime khoá theo phiên bản.** Skeleton export từ Spine 4.3.x chỉ nạp được bằng runtime 4.3.x.
+Nâng cấp editor mà quên nâng npm là vỡ trắng, và thông báo lỗi không nói ra điều đó.
+
+**Runtime Spine đòi giấy phép Spine Editor.** Xem header license trong `node_modules/@esotericsoftware/`.
 
 **Trong hội thoại AI nói ~150 từ/phút.** Không ai nhìn kịp từng khẩu hình ở tốc độ đó. Kéo
 `playbackRate` xuống 0.4× thì xem được — nhưng vẫn là nghe trôi qua một lần, không tua lại được
@@ -196,5 +219,9 @@ lùi qua backend, nên CORS không qua là AI câm.
 **`crypto.subtle` chỉ có trong secure context.** `http://localhost` có, `http://192.168.x.x` thì
 **không** — mở trên điện thoại cùng mạng LAN sẽ thấy nó `undefined` chứ không phải lỗi chữ ký.
 
-**Chưa render avatar 3D lần nào.** Ba nhánh hỏng ở mục 2 đều có mã xử lý, nhưng chưa ai nhìn thấy
-nó chạy.
+**Chưa render avatar lần nào.** Ba nhánh hỏng ở mục 2 đều có mã xử lý, nhưng chưa ai nhìn thấy nó
+chạy. Mỗi skeleton còn có animation `Test mieng` do hoạ sĩ để lại — phát nó là cách rẻ nhất để tách
+"rig hỏng" khỏi "dữ liệu Polly hỏng".
+
+**Asset nặng.** PNG 1.9–3.4 MB mỗi nhân vật, bốn nhân vật ~10 MB. Chỉ tải nhân vật đang chọn, và
+dùng `.skel` (69 KB) chứ không phải `.json` (135 KB).

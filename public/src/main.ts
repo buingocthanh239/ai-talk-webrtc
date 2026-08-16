@@ -2,15 +2,16 @@ import { api } from './api.ts';
 import { LessonSession } from './session.ts';
 import type { PttState, SessionHandlers } from './session.ts';
 // Chi lay KIEU o day. Module that duoc nap bang dynamic import trong
-// mountTalkAvatar(), vi no keo theo three.js — xem build.js.
+// mountTalkAvatar(), vi no keo theo runtime Spine — xem build.js.
 import type { TalkAvatar } from './talk-avatar.ts';
 import { synthesize } from './polly-client.ts';
 
 import type {
+  AvatarBundle,
+  Character,
   Lesson,
   Message,
   ObjectiveProgress,
-  PollyEngine,
   PollyGrant,
   Quota,
   Role,
@@ -49,7 +50,7 @@ const screens = {
 
 /** Avatar cua man hoi thoai. null khi chua dung xong hoac da roi man. */
 let talkAvatar: TalkAvatar | null = null;
-/** Dung nap hai lan khi reconnect — moi lan connect deu bao lai avatarUrl. */
+/** Dung nap hai lan khi reconnect — moi lan connect deu bao lai nhan vat. */
 let talkAvatarLoading = false;
 
 /** `catch (err)` cho ra `unknown` duoi strict — boc mot lan o day. */
@@ -57,7 +58,7 @@ const errorMessage = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
 
 function showScreen(name: keyof typeof screens): void {
-  // Avatar giu mot vong rAF cua three.js va mot vong nua cua VisemePlayer. Roi
+  // Avatar giu mot vong rAF cua Spine va mot vong nua cua VisemePlayer. Roi
   // man ma khong dong thi no ve tiep duoi nen, an pin va CPU cho toi khi dong
   // tab.
   if (name !== 'live') {
@@ -102,6 +103,7 @@ async function loadHome(): Promise<void> {
     api.listLessons().catch(() => []),
     api.listSessions().catch(() => []),
     api.getQuota().catch(() => null),
+    loadRoster(),
   ]);
 
   renderQuotaNotice(quota);
@@ -390,66 +392,73 @@ function renderSpeed(value: number): void {
 
 // ------------------------------------------------------------ giong doc
 
-const VOICE_KEY = 'ai-learn:voice';
-const ENGINE_KEY = 'ai-learn:engine';
+const CHARACTER_KEY = 'ai-learn:character';
 const SAVE_AUDIO_KEY = 'ai-learn:save-ai-audio';
 
 /**
- * Danh sach giong ghi cung thay vi goi `DescribeVoices`.
+ * Danh sach nhan vat, nap mot lan luc mo trang.
  *
- * Goi DescribeVoices nghia la them mot API nua phai ky tu browser, de lay ve
- * mot danh sach gan nhu khong bao gio doi. Khi nao Polly ra giong moi dang
- * dung thi them mot dong o day.
+ * KHONG con o chon giong rieng nua: giong thuoc ve nhan vat. Mot o chon giong
+ * toan cuc se de len giong cua ca bon nhan vat, tuc la xoa sach cai khien
+ * chung khac nhau. Doi giong cua mot nhan vat = sua file
+ * server/characters/<code>.json.
  */
-const VOICES: readonly { id: string; label: string }[] = [
-  { id: 'Joanna', label: 'Joanna — nữ, Mỹ' },
-  { id: 'Matthew', label: 'Matthew — nam, Mỹ' },
-  { id: 'Ruth', label: 'Ruth — nữ, Mỹ' },
-  { id: 'Stephen', label: 'Stephen — nam, Mỹ' },
-  { id: 'Amy', label: 'Amy — nữ, Anh' },
-  { id: 'Brian', label: 'Brian — nam, Anh' },
-  { id: 'Olivia', label: 'Olivia — nữ, Úc' },
-];
-
-const ENGINES: readonly PollyEngine[] = ['standard', 'neural', 'long-form'];
-
-const storedEngine = (): PollyEngine => {
-  const raw = localStorage.getItem(ENGINE_KEY);
-  return ENGINES.includes(raw as PollyEngine) ? (raw as PollyEngine) : 'neural';
-};
-
-const storedVoice = (): string => localStorage.getItem(VOICE_KEY) ?? 'Joanna';
+let roster: Character[] = [];
+let defaultCharacterCode = '';
 
 const storedSaveAudio = (): boolean => localStorage.getItem(SAVE_AUDIO_KEY) === '1';
 
-function buildVoicePanel(): void {
-  const select = $<HTMLSelectElement>('voice-select');
-  select.replaceChildren(
-    ...VOICES.map(({ id, label }) => {
-      const option = document.createElement('option');
-      option.value = id;
-      option.textContent = label;
-      return option;
+/** Nhan vat dang chon. Roi ve mac dinh khi chua chon hoac code da bien mat. */
+function chosenCharacter(): Character | null {
+  const code = localStorage.getItem(CHARACTER_KEY) ?? defaultCharacterCode;
+  return roster.find((c) => c.code === code) ?? roster[0] ?? null;
+}
+
+async function loadRoster(): Promise<void> {
+  try {
+    const list = await api.listCharacters();
+    roster = list.characters;
+    defaultCharacterCode = list.defaultCode;
+  } catch (err) {
+    console.warn('[character]', errorMessage(err));
+  }
+  renderRoster();
+}
+
+function renderRoster(): void {
+  const chosen = chosenCharacter();
+  $('character-list').replaceChildren(
+    ...roster.map((c) => {
+      const card = el('button', 'character-card');
+      card.classList.toggle('active', c.code === chosen?.code);
+      // Nhan vat tra phi van hien: an di thi khong ai biet co gi de mo khoa.
+      // Server moi la cho chan that (402 luc tao session).
+      if (c.tier === 'paid') card.classList.add('locked');
+
+      card.append(el('strong', null, c.name));
+      const tags = el('div', 'tags');
+      for (const t of c.tags) tags.append(el('span', 'tag', t));
+      if (c.tier === 'paid') tags.append(el('span', 'tag accent', 'Trả phí'));
+      card.append(tags);
+      card.append(el('span', 'meta', c.voiceStyle));
+
+      card.onclick = () => {
+        localStorage.setItem(CHARACTER_KEY, c.code);
+        renderRoster();
+      };
+      return card;
     })
   );
-  select.value = storedVoice();
-  $<HTMLSelectElement>('engine-select').value = storedEngine();
-  $<HTMLInputElement>('save-audio').checked = storedSaveAudio();
 }
 
-/** Doi giong: ap dung tu khuc KE TIEP, khuc dang doc thi de yen. */
-function applyVoice(): void {
-  const voiceId = $<HTMLSelectElement>('voice-select').value;
-  const engine = $<HTMLSelectElement>('engine-select').value as PollyEngine;
-  localStorage.setItem(VOICE_KEY, voiceId);
-  localStorage.setItem(ENGINE_KEY, engine);
-  active?.setVoice(voiceId, engine);
+/** Ten + tinh cach cua nhan vat, hien o panel ben canh trong luc hoc. */
+function renderCharacterBadge(character: Character): void {
+  $('voice-name').textContent = character.name;
+  $('voice-style').textContent = character.voiceStyle;
+  $('voice-detail').textContent = `${character.voice.voiceId} · ${character.voice.engine}`;
 }
 
-buildVoicePanel();
-
-$<HTMLSelectElement>('voice-select').onchange = applyVoice;
-$<HTMLSelectElement>('engine-select').onchange = applyVoice;
+$<HTMLInputElement>('save-audio').checked = storedSaveAudio();
 
 $<HTMLInputElement>('save-audio').onchange = (e) => {
   const enabled = (e.currentTarget as HTMLInputElement).checked;
@@ -468,7 +477,7 @@ $<HTMLInputElement>('save-audio').onchange = (e) => {
  * Goi lai moi lan bat tay (ke ca reconnect) nen phai chan dung hai lan — mot
  * lan reconnect giua buoi la du de co hai avatar cung ve len mot canvas.
  */
-async function mountTalkAvatar(avatarUrl: string | null): Promise<void> {
+async function mountTalkAvatar(bundle: AvatarBundle | null): Promise<void> {
   if (talkAvatar || talkAvatarLoading) return;
   talkAvatarLoading = true;
   try {
@@ -480,7 +489,7 @@ async function mountTalkAvatar(avatarUrl: string | null): Promise<void> {
       bars: $('talk-bars'),
       hint: $('talk-hint'),
       audio: $<HTMLAudioElement>('ai-audio'),
-      avatarUrl,
+      bundle,
     });
   } catch (err) {
     // Avatar la phan trang tri cua buoi hoc, khong phai duong song. Hong thi
@@ -576,7 +585,7 @@ async function startLesson(lesson: Lesson): Promise<void> {
 
   let sessionId;
   try {
-    ({ sessionId } = await api.startSession(lesson.id));
+    ({ sessionId } = await api.startSession(lesson.id, chosenCharacter()?.code));
   } catch (err) {
     setBanner(`Không tạo được buổi học: ${errorMessage(err)}`, 'error');
     return;
@@ -714,8 +723,9 @@ async function runSession({
         talkAvatar?.load(frames);
       },
 
-      avatar(avatarUrl) {
-        void mountTalkAvatar(avatarUrl);
+      character(character) {
+        renderCharacterBadge(character);
+        void mountTalkAvatar(character.avatar);
       },
 
       quotaExhausted() {
@@ -732,7 +742,6 @@ async function runSession({
 
   renderSpeed(active.speed);
   // Lua chon cua nguoi hoc song lau hon mot buoi hoc, nen ap lai moi lan mo.
-  active.setVoice(storedVoice(), storedEngine());
   active.setSaveAiAudio(storedSaveAudio());
 
   try {
@@ -947,7 +956,7 @@ function renderReplay(body: HTMLElement, session: SessionDetail): void {
       // Khong bat luu mp3 thi khong co file nao ca — doc lai bang Polly ngay
       // luc bam. Ton them tien moi lan nghe, doi lai buoi hoc khong phai luu
       // gi, va ban doc lai nay co du viseme neu sau nay muon xem khau hinh.
-      row.append(speakAgainButton(m.text, session.pollyGrant));
+      row.append(speakAgainButton(m.text, session.pollyGrant, session.character));
     } else {
       row.append(el('div', 'no-audio', 'không có audio'));
     }
@@ -961,17 +970,16 @@ function renderReplay(body: HTMLElement, session: SessionDetail): void {
  * Chi doc mot lan roi giu lai the <audio>: bam nghe di nghe lai la chuyen binh
  * thuong o man tong ket, va moi lan goi Polly la mot lan tra tien.
  */
-function speakAgainButton(text: string, grant: PollyGrant): HTMLElement {
+function speakAgainButton(text: string, grant: PollyGrant, character: Character): HTMLElement {
   const button = el('button', 'ghost-btn', '🔊 Đọc lại');
 
   button.onclick = async () => {
     (button as HTMLButtonElement).disabled = true;
     button.textContent = 'Đang đọc…';
     try {
-      const { url } = await synthesize(grant, text, {
-        voiceId: storedVoice(),
-        engine: storedEngine(),
-      });
+      // Giong cua dung nhan vat da day buoi do, khong phai nhan vat dang chon
+      // o trang chu — nghe lai ma khac giong thi khong con la nghe lai.
+      const { url } = await synthesize(grant, text, character.voice);
       const audio = el('audio') as HTMLAudioElement;
       audio.controls = true;
       audio.src = url;

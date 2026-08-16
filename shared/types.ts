@@ -101,6 +101,7 @@ export interface SessionDetail {
   lesson: Lesson;
   messages: Message[];
   summary: Summary | null;
+  character: Character;
   /**
    * Cap ngay tai day de man tong ket doc lai cau AI bang Polly ma khong phai
    * xin them mot vong. Buoi hoc cu thi credential luc hoc da het han tu lau,
@@ -152,6 +153,46 @@ export interface UploadGrant {
 /** Engine `generative` khong nam trong day: no khong tra speech marks. */
 export type PollyEngine = 'standard' | 'neural' | 'long-form';
 
+/** Asset Spine cua mot nhan vat. null = nhan vat chua co avatar. */
+export interface AvatarBundle {
+  /** `.skel` (nhi phan, nho hon nhieu) hoac `.json`. */
+  skeleton: string;
+  atlas: string;
+}
+
+/**
+ * Mot nhan vat AI: khuon mat, giong noi va tinh cach.
+ *
+ * `personality` / `voiceStyle` / `greetingStyle` di THANG vao instructions
+ * (`server/prompt.ts`). Khong co phan do thi doi nhan vat chi la doi anh voi
+ * doi giong, con AI van noi y het nhau — tuc la khong co nhan vat nao ca.
+ */
+export interface Character {
+  code: string;
+  name: string;
+  sort: number;
+  tier: 'free' | 'paid';
+  gender: 'male' | 'female' | 'neutral';
+  tags: string[];
+  personality: string;
+  voiceStyle: string;
+  /** De trong thi AI tu chao theo tinh cach cua no. */
+  greetingStyle: string;
+  /**
+   * He so toc do NEN cua nhan vat, nhan voi slider cua nguoi hoc.
+   * Leo 1.05 x slider 0.8 = 0.84.
+   */
+  speed: number;
+  voice: { voiceId: string; engine: PollyEngine };
+  avatar: AvatarBundle | null;
+}
+
+export interface CharacterList {
+  characters: Character[];
+  /** `code` cua nhan vat mac dinh. Luon tro toi mot nhan vat co that. */
+  defaultCode: string;
+}
+
 /**
  * Quyen goi Amazon Polly, cap mot lan cho ca buoi hoc.
  *
@@ -181,10 +222,8 @@ export interface TokenResponse {
   uploadGrant: UploadGrant | null;
   pollyGrant: PollyGrant | null;
   /**
-   * File .glb cua avatar cho man hoi thoai. null thi khong dung avatar.
-   *
-   * Di kem token chu khong co endpoint rieng: day la thu duy nhat man hoi thoai
-   * con thieu, va no da goi `/token` roi.
+   * Nhan vat cua buoi hoc nay. Di kem token chu khong co endpoint rieng: no la
+   * nguon duy nhat cho ca giong doc, he so toc do lan asset avatar.
    */
-  avatarUrl: string | null;
+  character: Character;
 }

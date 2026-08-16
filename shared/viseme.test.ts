@@ -4,19 +4,21 @@ import assert from 'node:assert/strict';
 import {
   POLLY_TO_VISEME,
   SCHWA_WEIGHT,
-  VISEMES,
+  UNREACHABLE_BY_POLLY,
   VISEME_HINT_VI,
+  VISEME_IDS,
   frameAt,
   frameFromPolly,
-  morphName,
   parseSpeechMarks,
+  visemeAnimation,
   type VisemeFrame,
 } from './viseme.ts';
 
-test('moi viseme deu co ten morph target va goi y tieng Viet', () => {
-  for (const v of VISEMES) {
-    assert.equal(morphName(v), `viseme_${v}`);
-    assert.ok(VISEME_HINT_VI[v], `thieu goi y cho ${v}`);
+test('rig co dung 22 khau hinh, moi cai co ten animation va goi y tieng Viet', () => {
+  assert.equal(VISEME_IDS.length, 22);
+  for (const id of VISEME_IDS) {
+    assert.equal(visemeAnimation(id), `viseme_${id}`);
+    assert.ok(VISEME_HINT_VI[id], `thieu goi y cho ${id}`);
   }
 });
 
@@ -25,23 +27,39 @@ test('bang map phu het bo viseme en-US cua Polly', () => {
   // gia tri o day nghia la co am bi bo qua im lang giua cau.
   const pollyValues = 'sil p t S T f k l r s i u @ a e E o O'.split(' ');
   for (const value of pollyValues) {
-    assert.ok(POLLY_TO_VISEME[value], `chua map gia tri Polly "${value}"`);
+    assert.notEqual(POLLY_TO_VISEME[value], undefined, `chua map gia tri Polly "${value}"`);
   }
   assert.equal(Object.keys(POLLY_TO_VISEME).length, pollyValues.length);
 });
 
+test('moi ID map ra deu nam trong bo cua rig', () => {
+  for (const id of Object.values(POLLY_TO_VISEME)) {
+    assert.ok(VISEME_IDS.includes(id), `ID ${id} khong co animation tuong ung`);
+  }
+});
+
+test('nam khau hinh Polly khong voi toi duoc dung la nam cai da khai', () => {
+  // Neu bang map doi ma danh sach nay khong doi theo thi thanh do debug se
+  // lam mo nham — nguoi doc se di tim loi o cho khong co loi.
+  const reachable = new Set(Object.values(POLLY_TO_VISEME));
+  const missing = VISEME_IDS.filter((id) => !reachable.has(id));
+  assert.deepEqual(missing, [...UNREACHABLE_BY_POLLY]);
+});
+
 test('map dung cac cho gop co y', () => {
-  // Rig Oculus khong tach /eɪ/ voi /ɛ/, cung khong tach /oʊ/ voi /ɔ/.
+  // Polly khong tach /eɪ/ voi /ɛ/, cung khong tach cac nguyen am doi.
   assert.equal(POLLY_TO_VISEME['e'], POLLY_TO_VISEME['E']);
-  assert.equal(POLLY_TO_VISEME['o'], POLLY_TO_VISEME['O']);
-  // l phai ra nn (luoi cham loi), khong duoc lan sang DD.
-  assert.equal(POLLY_TO_VISEME['l'], 'nn');
-  assert.equal(POLLY_TO_VISEME['t'], 'DD');
+  // T (θ, ð) cho ve 17 chu khong phai 19: hinh luoi giua hai rang la thu
+  // nguoi hoc can nhin thay, quan trong hon viec khop bang cua Azure.
+  assert.equal(POLLY_TO_VISEME['T'], 17);
+  assert.equal(POLLY_TO_VISEME['t'], 19);
+  // l (14) phai tach khoi d/t/n (19) — rig nay co luoi nen tach duoc.
+  assert.equal(POLLY_TO_VISEME['l'], 14);
 });
 
 test('frameFromPolly ha trong so cho schwa', () => {
-  assert.deepEqual(frameFromPolly(120, '@'), { tMs: 120, viseme: 'E', weight: SCHWA_WEIGHT });
-  assert.deepEqual(frameFromPolly(120, 'E'), { tMs: 120, viseme: 'E', weight: 1 });
+  assert.deepEqual(frameFromPolly(120, '@'), { tMs: 120, viseme: 1, weight: SCHWA_WEIGHT });
+  assert.deepEqual(frameFromPolly(120, 'E'), { tMs: 120, viseme: 4, weight: 1 });
 });
 
 test('frameFromPolly bo qua gia tri la thay vi nem', () => {
@@ -49,9 +67,9 @@ test('frameFromPolly bo qua gia tri la thay vi nem', () => {
 });
 
 const frames: VisemeFrame[] = [
-  { tMs: 0, viseme: 'sil', weight: 1 },
-  { tMs: 100, viseme: 'PP', weight: 1 },
-  { tMs: 250, viseme: 'aa', weight: 1 },
+  { tMs: 0, viseme: 0, weight: 1 },
+  { tMs: 100, viseme: 21, weight: 1 },
+  { tMs: 250, viseme: 2, weight: 1 },
 ];
 
 test('frameAt tra ve khau hinh dang giu va moc het han', () => {
@@ -82,9 +100,9 @@ test('parseSpeechMarks doc JSON phan cach bang dong', () => {
   ].join('\n');
 
   assert.deepEqual(parseSpeechMarks(raw), [
-    { tMs: 0, viseme: 'sil', weight: 1 },
-    { tMs: 126, viseme: 'PP', weight: 1 },
-    { tMs: 200, viseme: 'E', weight: 0.55 },
+    { tMs: 0, viseme: 0, weight: 1 },
+    { tMs: 126, viseme: 21, weight: 1 },
+    { tMs: 200, viseme: 1, weight: 0.55 },
   ]);
 });
 
@@ -95,14 +113,14 @@ test('parseSpeechMarks loai mark khong phai viseme', () => {
     '{"time":10,"type":"viseme","value":"a"}',
   ].join('\n');
 
-  assert.deepEqual(parseSpeechMarks(raw), [{ tMs: 10, viseme: 'aa', weight: 1 }]);
+  assert.deepEqual(parseSpeechMarks(raw), [{ tMs: 10, viseme: 2, weight: 1 }]);
 });
 
 test('parseSpeechMarks bo qua dong hong thay vi mat ca cau', () => {
   const raw =
     '{"time":0,"type":"viseme","value":"sil"}\n{khong phai json\n\n{"time":5,"type":"viseme","value":"t"}';
   assert.deepEqual(parseSpeechMarks(raw), [
-    { tMs: 0, viseme: 'sil', weight: 1 },
-    { tMs: 5, viseme: 'DD', weight: 1 },
+    { tMs: 0, viseme: 0, weight: 1 },
+    { tMs: 5, viseme: 19, weight: 1 },
   ]);
 });

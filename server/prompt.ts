@@ -5,7 +5,7 @@
  * nen browser khong sua duoc luat cham diem hay luat goi tool.
  */
 
-import type { Lesson, Message, ProgressRecord, SeedItem } from '../shared/types.ts';
+import type { Character, Lesson, Message, ProgressRecord, SeedItem } from '../shared/types.ts';
 
 export interface ResumeContext {
   summary: string;
@@ -40,13 +40,35 @@ export function buildInstructions(
   {
     progress = [],
     resume = null,
-  }: { progress?: ProgressRecord[]; resume?: ResumeContext | null } = {}
+    character = null,
+  }: {
+    progress?: ProgressRecord[];
+    resume?: ResumeContext | null;
+    character?: Character | null;
+  } = {}
 ): string {
   const hintLanguageRule = lesson.allowVietnameseHint
     ? 'At hint level 3 only, you may add one short Vietnamese gloss in parentheses. Everywhere else, English only.'
     : 'English only at all times. Never speak Vietnamese, even if the learner does.';
 
-  const base = `# Role
+  // Nhan vat dat TRUOC kich ban bai hoc: kich ban noi buoi hoc dien ra o dau,
+  // nhan vat noi AI la AI. Dao thu tu thi model bam kich ban va bo qua tinh
+  // cach — doi nhan vat se chi con la doi giong.
+  const persona = character
+    ? `# Who you are
+Your name is ${character.name}.
+
+Personality: ${character.personality}
+How you speak: ${character.voiceStyle}
+${character.greetingStyle ? `First turn: ${character.greetingStyle}` : ''}
+
+Stay this person for the whole lesson. The scenario below is the SITUATION you are in, not a
+different personality — play the role below as ${character.name} would play it.
+
+`
+    : '';
+
+  const base = `${persona}# Role
 ${lesson.scenario}
 
 You are also an English speaking coach running a structured lesson. Stay fully in character as the

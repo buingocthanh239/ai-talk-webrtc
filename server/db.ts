@@ -28,6 +28,8 @@ export interface SessionRow {
   end_reason: string | null;
   hint_count: number;
   summary_json: string | null;
+  /** `code` cua nhan vat AI. Rong = buoi hoc tao truoc khi co nhan vat. */
+  character_code: string;
 }
 
 export interface CallRow {
@@ -90,7 +92,8 @@ CREATE TABLE IF NOT EXISTS session (
   ended_at     INTEGER,
   end_reason   TEXT,
   hint_count   INTEGER NOT NULL DEFAULT 0,
-  summary_json TEXT
+  summary_json TEXT,
+  character_code TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS message (
@@ -143,9 +146,21 @@ CREATE INDEX IF NOT EXISTS idx_call_user ON call(user_id, started_at);
   }
 }
 
+// Nhan vat AI. Buoi hoc cu khong co cot nay; de trong roi de `characterOr()`
+// roi ve mac dinh, hon la nhet san mot code co the bien mat khi doi file.
+{
+  const columns = db.prepare(`SELECT name FROM pragma_table_info('session')`).all() as unknown as {
+    name: string;
+  }[];
+  if (!columns.some((c) => c.name === 'character_code')) {
+    db.exec(`ALTER TABLE session ADD COLUMN character_code TEXT NOT NULL DEFAULT ''`);
+  }
+}
+
 const q = {
   createSession: db.prepare(
-    `INSERT INTO session (id, lesson_id, user_id, started_at) VALUES (?, ?, ?, ?)`
+    `INSERT INTO session (id, lesson_id, user_id, started_at, character_code)
+     VALUES (?, ?, ?, ?, ?)`
   ),
   getSession: db.prepare(`SELECT * FROM session WHERE id = ?`),
   listSessions: db.prepare(
@@ -205,8 +220,13 @@ const q = {
 
 const now = (): number => Date.now();
 
-export function createSession(id: string, lessonId: string, userId = 'demo-user'): SessionRow {
-  q.createSession.run(id, lessonId, userId, now());
+export function createSession(
+  id: string,
+  lessonId: string,
+  userId = 'demo-user',
+  characterCode = ''
+): SessionRow {
+  q.createSession.run(id, lessonId, userId, now(), characterCode);
   const session = getSession(id);
   // Vua INSERT xong ma doc lai khong thay thi DB da hong that su — nga ra
   // ngay con hon tra ve null roi de cho goi phai doan.

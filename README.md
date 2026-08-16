@@ -5,14 +5,14 @@ Demo luồng học nói tiếng Anh thời gian thực bằng **OpenAI Realtime 
 **Backend zero dependency** — chỉ dùng core module của Node (`node:http`, `node:sqlite`, `node:crypto`).
 Ký SigV4 cho S3 và Polly, ký CloudFront đều viết tay, không kéo AWS SDK về.
 
-Client có đúng **một** runtime dependency: `three` cho avatar 3D nhép mồm theo lời AI. Nó nằm ở
-chunk riêng, chỉ tải khi có cấu hình avatar — `bundle.js` vẫn ~80KB.
+Client có đúng **một** runtime dependency: `@esotericsoftware/spine-webgl` cho avatar 2D nhép mồm
+theo lời AI. Nó nằm ở chunk riêng, chỉ tải khi nhân vật có asset — `bundle.js` vẫn ~80KB.
 
 ## Chạy
 
 ```bash
 cp .env.example .env      # rồi điền OPENAI_API_KEY
-npm install               # esbuild + three
+npm install               # esbuild + spine-webgl
 npm start                 # http://localhost:3000
 ```
 
@@ -151,7 +151,7 @@ chữ thành từng khúc, tự ký SigV4 và gọi thẳng Amazon Polly lấy m
 response.output_text.delta
   → SentenceChunker           khúc đầu 15–40 ký tự, khúc sau tới 200
   → Polly SynthesizeSpeech ×2  (client tự ký, không qua backend)
-  → <audio src=blob:> + VisemePlayer → avatar nhép ngay trong hội thoại
+  → <audio src=blob:> + VisemePlayer → avatar Spine nhép ngay trong hội thoại
 ```
 
 **Vì sao đổi.** Realtime API không phát ra viseme/phoneme nào, nên chừng nào tiếng nói còn đến từ
@@ -211,11 +211,12 @@ server/
   polly.ts      đọc cấu hình Polly (giọng/engine/region) — KHÔNG gọi Polly
   sts.ts        AssumeRole → credential tạm cho client gọi Polly
   lessons/      bài học dạng JSON
+  characters/   nhân vật AI dạng JSON
 shared/         kiểu + logic dùng chung hai phía
   types.ts      hình dạng JSON qua ranh giới HTTP
   speed.ts      chặn tốc độ nói
   chunk.ts      cắt dòng text của AI thành khúc gửi lên Polly
-  viseme.ts     map Polly → Oculus, đọc speech marks, gợi ý khẩu hình VI
+  viseme.ts     map Polly → 22 viseme ID của rig, đọc speech marks, gợi ý VI
 public/
   index.html    3 màn: chọn bài / đang học / tổng kết
   src/realtime.ts      transport WebRTC thuần
@@ -224,14 +225,42 @@ public/
   src/polly-client.ts  ký SigV4 bằng WebCrypto, gọi thẳng Polly
   src/speech-queue.ts  cắt khúc → đọc trước → phát đúng thứ tự
   src/main.ts          DOM
-  src/talk-avatar.ts   avatar + 15 thanh đo viseme (nạp bằng dynamic import)
-  src/viseme-player.ts timeline → trọng số, bám audio.currentTime
-  src/avatar.ts        three.js + morph target
+  src/talk-avatar.ts   avatar + 22 thanh đo viseme (nạp bằng dynamic import)
+  src/viseme-player.ts timeline → khẩu hình đang mở + trọng số
+  src/avatar.ts        Spine WebGL, 2 track (Idle / miệng)
+character/      asset Spine: <Tên>.skel / .atlas.txt / .png
 data/           app.db + audio/ (tự tạo, đã gitignore)
 ```
 
 Client build bằng esbuild có **code splitting**: `talk-avatar.ts` được nạp bằng dynamic import nên
-three.js rơi vào chunk riêng (1.3MB), không nằm trong `bundle.js`.
+runtime Spine rơi vào chunk riêng, không nằm trong `bundle.js`.
+
+## Nhân vật
+
+Bốn nhân vật, mỗi cái một file JSON trong `server/characters/` — cùng lối với bài học. `GET
+/api/characters` trả cả danh sách, người học chọn ở trang chủ, lựa chọn nhớ trong `localStorage`.
+
+| | Giọng Polly | Tier | Nét |
+|---|---|---|---|
+| LEO *(mặc định)* | Joanna | free | nhiệt tình, kiên nhẫn; đọc nhanh hơn 1.05× |
+| MARCO | Matthew | free | ấm, kể chuyện |
+| PROF | Brian *(Anh-Anh)* | free | nghiêm, chính xác |
+| TINA | Ruth | paid | tưng bừng, Gen Z |
+
+**Nhân vật đổi cả cách AI nói chuyện, không chỉ đổi giọng.** `personality` / `voiceStyle` /
+`greetingStyle` được nhét vào đầu `instructions` (`server/prompt.ts`), **trước** kịch bản bài học —
+đảo thứ tự thì model bám kịch bản và bỏ qua tính cách.
+
+`speed` cấp nhân vật là **hệ số nền**, nhân với slider của người học: Leo 1.05 × slider 0.8 = 0.84.
+
+**`tier: paid` chặn ở server** (402 lúc tạo session), không phải ẩn nút ở client — nút ẩn thì một
+request gửi tay vẫn mở được.
+
+**Không có ô chọn giọng riêng.** Giọng thuộc về nhân vật; một ô chọn giọng toàn cục sẽ đè lên cả
+bốn, tức là xoá sạch cái khiến chúng khác nhau. Đổi giọng một nhân vật = sửa file JSON của nó.
+
+**Avatar là Spine 2D**, asset nằm ở `character/<Tên>/`. Mỗi skeleton có 22 animation `viseme_0…21`
+(bộ viseme của Azure). Polly chỉ chạm được 17/22 — xem [`docs/lip-sync.md`](docs/lip-sync.md) mục 4.
 
 ## Cấu hình
 
@@ -254,12 +283,11 @@ three.js rơi vào chunk riêng (1.3MB), không nằm trong `bundle.js`.
 | `CF_PRIVATE_KEY` / `CF_PRIVATE_KEY_PATH` | — | đặt **một** trong hai; `CF_PRIVATE_KEY` được ưu tiên |
 | `POLLY` | `off` | `on` = AI có tiếng nói. Tắt thì AI chỉ hiện chữ |
 | `POLLY_REGION` | theo `S3_REGION` | bucket và Polly không bắt buộc cùng vùng |
-| `POLLY_VOICE` | `Joanna` | chỉ là mặc định — người học đổi giọng ngay trên màn học |
+| `POLLY_VOICE` | `Joanna` | chỉ là phương án cuối; giọng thật lấy từ file nhân vật |
 | `POLLY_ENGINE` | `neural` | `standard` \| `neural` \| `long-form`. **Không** dùng được `generative` |
 | `POLLY_STS_ROLE_ARN` | — | để trống = AI **không nói được** trong hội thoại (vẫn hiện chữ). Role chỉ nên cho `polly:SynthesizeSpeech` |
 | `POLLY_STS_TTL_SEC` | `3600` | hạn credential tạm; AWS chặn trong 900..3600 |
 | `POLLY_STS_BIND_IP` | `on` | ràng credential vào IP client. Tắt khi sau reverse proxy không đặt `X-Forwarded-For` |
-| `AVATAR_URL` | — | file `.glb`; để trống thì chỉ hiện 15 thanh đo viseme |
 
 Polly dùng chung `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` với S3 — cùng một tài khoản AWS,
 không bắt khai hai lần.
@@ -267,7 +295,8 @@ không bắt khai hai lần.
 Thiếu biến bắt buộc thì server ngã ra ngay lúc khởi động, không đợi tới lúc người học nói xong câu
 đầu tiên mới phát hiện không lưu được audio.
 
-Thêm bài học mới: bỏ một file JSON vào `server/lessons/` rồi restart. Không cần sửa code.
+Thêm bài học mới: bỏ một file JSON vào `server/lessons/` rồi restart. Nhân vật cũng vậy —
+`server/characters/`. Không cần sửa code.
 
 ## Test
 

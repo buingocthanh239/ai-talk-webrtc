@@ -5,6 +5,7 @@ import { TrackRecorder } from './recorder.ts';
 import { SpeechQueue } from './speech-queue.ts';
 
 import type {
+  Character,
   Lesson,
   ObjectiveProgress,
   PollyEngine,
@@ -54,8 +55,8 @@ export interface SessionHandlers {
    * `VisemePlayer` — day la thu ma duong audio cu khong bao gio cho duoc.
    */
   visemes?: (frames: VisemeFrame[]) => void;
-  /** File .glb de dung avatar. Goi mot lan khi bat tay xong. */
-  avatar?: (avatarUrl: string | null) => void;
+  /** Nhan vat cua buoi hoc. Goi mot lan khi bat tay xong. */
+  character?: (character: Character) => void;
 }
 
 /** Mot luot noi dang cho: moc thoi gian trong recorder de cat WAV ve sau. */
@@ -153,6 +154,9 @@ export class LessonSession {
   /** Bien text cua AI thanh tieng noi qua Polly. */
   readonly #speech: SpeechQueue;
 
+  /** Nhan vat AI. null cho toi khi bat tay xong. */
+  #character: Character | null = null;
+
   /**
    * Cac khuc mp3 cua luot AI dang noi, gom lai de day len S3 khi bat luu.
    *
@@ -216,6 +220,10 @@ export class LessonSession {
     this.#speech.setRate(this.#speed);
   }
 
+  get character(): Character | null {
+    return this.#character;
+  }
+
   // -------------------------------------------------------- toc do AI doc
 
   get speed(): number {
@@ -233,8 +241,18 @@ export class LessonSession {
    */
   setSpeed(value: number): number {
     this.#speed = clampSpeed(value, this.#speed);
-    this.#speech.setRate(this.#speed);
+    this.#applyRate();
     return this.#speed;
+  }
+
+  /**
+   * Toc do that = slider x he so nen cua nhan vat.
+   *
+   * Leo doc nhanh hon mot chut (1.05) la mot net tinh cach, khong phai cai
+   * nguoi hoc chinh. Nen no nhan vao chu khong de len.
+   */
+  #applyRate(): void {
+    this.#speech.setRate(this.#speed * (this.#character?.speed ?? 1));
   }
 
   // ---------------------------------------------------------- giong doc
@@ -359,7 +377,11 @@ export class LessonSession {
     // Ky mot lan cho ca buoi. Cap lai o day la du: reconnect di qua chinh
     // duong nay, va han cua grant dai hon moi buoi hoc.
     this.#speech.setGrant(token.pollyGrant ?? null);
-    this.on.avatar?.(token.avatarUrl ?? null);
+    this.#character = token.character;
+    // He so toc do cua nhan vat nhan voi slider — phai ap lai sau khi biet
+    // nhan vat, neu khong luot dau tien se doc bang toc do cua nguoi khac.
+    this.#applyRate();
+    this.on.character?.(token.character);
 
     for (const p of token.progress ?? []) {
       this.#progress.set(p.objectiveId, p);

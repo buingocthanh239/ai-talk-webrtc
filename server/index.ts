@@ -6,7 +6,14 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-import type { Lesson, PollyGrant, ProgressRecord, Quota } from '../shared/types.ts';
+import type {
+  Character,
+  CharacterList,
+  Lesson,
+  PollyGrant,
+  ProgressRecord,
+  Quota,
+} from '../shared/types.ts';
 
 import * as db from './db.ts';
 import { AUDIO_DIR } from './db.ts';
@@ -21,6 +28,9 @@ import { pollyGrant as mintPollyGrant, stsConfigFromEnv } from './sts.ts';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC_DIR = join(ROOT, 'public');
 const LESSON_DIR = join(ROOT, 'server', 'lessons');
+const CHARACTER_DIR = join(ROOT, 'server', 'characters');
+/** Asset Spine (.skel/.atlas.txt/.png) — nam ngoai public/ vi chung nang. */
+const CHARACTER_ASSET_DIR = join(ROOT, 'character');
 const PORT = Number(process.env.PORT || 3000);
 
 if (!process.env.OPENAI_API_KEY) {
@@ -41,6 +51,50 @@ async function loadLessons(): Promise<void> {
   console.log(`  Da nap ${lessons.size} bai hoc: ${[...lessons.keys()].join(', ')}`);
 }
 
+// ------------------------------------------------------------- nhan vat
+
+const characters = new Map<string, Character>();
+let defaultCharacter = '';
+
+/**
+ * Nap nhan vat tu server/characters/*.json — cung loi voi bai hoc: them mot
+ * nhan vat la them mot file roi restart, khong sua code.
+ *
+ * `"default": true` chon nhan vat mac dinh. Khong file nao khai thi lay cai
+ * `sort` nho nhat — luon phai co MOT, vi client can mot cai de mo len ngay.
+ */
+async function loadCharacters(): Promise<void> {
+  const files = (await readdir(CHARACTER_DIR)).filter((f) => f.endsWith('.json'));
+  const marked: string[] = [];
+
+  for (const f of files) {
+    const raw = JSON.parse(await readFile(join(CHARACTER_DIR, f), 'utf8')) as Character & {
+      default?: boolean;
+    };
+    const { default: isDefault, ...character } = raw;
+    characters.set(character.code, character);
+    if (isDefault) marked.push(character.code);
+  }
+
+  if (!characters.size) throw new Error(`Khong co nhan vat nao trong ${CHARACTER_DIR}`);
+  if (marked.length > 1) {
+    throw new Error(`Nhieu hon mot nhan vat khai "default": ${marked.join(', ')}`);
+  }
+
+  defaultCharacter =
+    marked[0] ?? [...characters.values()].sort((a, b) => a.sort - b.sort)[0]!.code;
+
+  console.log(
+    `  Da nap ${characters.size} nhan vat: ${[...characters.keys()].join(', ')}` +
+      ` (mac dinh: ${defaultCharacter})`
+  );
+}
+
+/** Nhan vat theo code, roi ve mac dinh khi code la hoac khong con ton tai. */
+function characterOr(code: string | null | undefined): Character {
+  return characters.get(code ?? '') ?? characters.get(defaultCharacter)!;
+}
+
 // ---------------------------------------------------------------- helpers
 
 const MIME: Record<string, string> = {
@@ -51,12 +105,17 @@ const MIME: Record<string, string> = {
   '.wav': 'audio/wav',
   '.mp3': 'audio/mpeg',
   '.glb': 'model/gltf-binary',
+  '.txt': 'text/plain; charset=utf-8',
+  '.skel': 'application/octet-stream',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.webp': 'image/webp',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
 };
 
 /**
- * Polly cho che do luyen khau hinh. null = chua bat, client se an tab do di.
+ * Polly — tieng noi cua AI. null = chua bat, AI se hien chu ma khong co tieng.
  * Nga ra ngay luc khoi dong neu cau hinh sai, giong cach s3.ts lam.
  */
 const polly = pollyConfigFromEnv();
@@ -69,13 +128,9 @@ const sts = stsConfigFromEnv();
 
 if (polly && !sts) {
   console.warn(
-    '  [polly] POLLY=on nhung chua co POLLY_STS_ROLE_ARN — AI se khong noi duoc trong hoi thoai\n' +
-      '          (man luyen khau hinh van chay vi no goi Polly o phia server).'
+    '  [polly] POLLY=on nhung chua co POLLY_STS_ROLE_ARN — AI se hien chu ma khong co tieng.'
   );
 }
-
-/** File .glb cua avatar. Khong co thi client chi ve thanh do viseme. */
-const AVATAR_URL = process.env.AVATAR_URL || null;
 
 /**
  * IP that cua client, de rang credential Polly vao no.
@@ -95,10 +150,17 @@ function clientIp(req: IncomingMessage): string | null {
  * Quyen goi Polly cho mot thiet bi. null khi chua cau hinh, hoac khi STS tu
  * choi — hong duong nay khong duoc lam hong ca buoi hoc, AI van hien chu.
  */
-async function pollyGrantFor(req: IncomingMessage, userId: string): Promise<PollyGrant | null> {
+async function pollyGrantFor(
+  req: IncomingMessage,
+  userId: string,
+  character?: Character
+): Promise<PollyGrant | null> {
   if (!polly || !sts) return null;
   try {
-    return await mintPollyGrant(polly, sts, {
+    // Giong cua nhan vat de len mac dinh trong env: POLLY_VOICE gio chi con
+    // la phuong an cuoi cho truong hop khong biet nhan vat nao.
+    const cfg = character ? { ...polly, ...character.voice } : polly;
+    return await mintPollyGrant(cfg, sts, {
       sessionName: userId,
       sourceIp: clientIp(req),
     });
@@ -250,10 +312,12 @@ async function mintClientSecret({
   lesson,
   progress,
   resume,
+  character,
 }: {
   lesson: Lesson;
   progress: ProgressRecord[];
   resume: ResumeContext | null;
+  character: Character;
 }): Promise<{ value: string; expiresAt: number; model: string }> {
   const model = process.env.REALTIME_MODEL || 'gpt-realtime';
 
@@ -261,7 +325,7 @@ async function mintClientSecret({
     session: {
       type: 'realtime',
       model,
-      instructions: buildInstructions(lesson, { progress, resume }),
+      instructions: buildInstructions(lesson, { progress, resume, character }),
       // AI chi tra ve CHU. Tieng noi do client tu lay tu Amazon Polly, vi
       // Realtime API khong phat ra viseme/phoneme nao — nhep mom trong hoi
       // thoai chi con cach suy tu pho am thanh, dung nhip nhung sai am vi.
@@ -458,6 +522,15 @@ const routes: Route[] = [
 
   {
     method: 'GET',
+    pattern: /^\/api\/characters$/,
+    handler: (): CharacterList => ({
+      characters: [...characters.values()].sort((a, b) => a.sort - b.sort),
+      defaultCode: defaultCharacter,
+    }),
+  },
+
+  {
+    method: 'GET',
     pattern: /^\/api\/sessions$/,
     handler: () =>
       db.listSessions().map((s) => ({
@@ -476,10 +549,21 @@ const routes: Route[] = [
     method: 'POST',
     pattern: /^\/api\/sessions$/,
     handler: async (req, _params, res) => {
-      const { lessonId } = await readJSON(req);
+      const { lessonId, characterCode } = await readJSON(req);
       if (!lessons.has(lessonId)) throw new HttpError(400, 'lessonId khong hop le');
-      const session = db.createSession(randomUUID(), lessonId, deviceId(req, res));
-      return { sessionId: session.id, lesson: lessons.get(lessonId) };
+
+      // Chan o SERVER chu khong an nut o client: nut an di thi mot request
+      // gui tay van mo duoc buoi hoc voi nhan vat tra phi.
+      const character = characterOr(characterCode);
+      if (character.tier === 'paid') {
+        throw new HttpError(402, `Nhan vat "${character.name}" danh cho ban tra phi`, {
+          code: 'character_paid',
+          characterCode: character.code,
+        });
+      }
+
+      const session = db.createSession(randomUUID(), lessonId, deviceId(req, res), character.code);
+      return { sessionId: session.id, lesson: lessons.get(lessonId), character };
     },
   },
 
@@ -593,7 +677,8 @@ const routes: Route[] = [
       return {
         // Nghe lai cau AI bang cach doc lai bang Polly (khi khong bat luu mp3).
         // Credential cua buoi hoc do da het han tu lau nen phai la ban moi.
-        pollyGrant: await pollyGrantFor(req, session.user_id),
+        character: characterOr(session.character_code),
+        pollyGrant: await pollyGrantFor(req, session.user_id, characterOr(session.character_code)),
         sessionId: session.id,
         status: session.status,
         startedAt: session.started_at,
@@ -640,7 +725,13 @@ const routes: Route[] = [
         resumeContext = buildResumeContext(lesson, db.listMessages(id), progress);
       }
 
-      const secret = await mintClientSecret({ lesson, progress, resume: resumeContext });
+      const character = characterOr(session.character_code);
+      const secret = await mintClientSecret({
+        lesson,
+        progress,
+        resume: resumeContext,
+        character,
+      });
       return {
         clientSecret: secret.value,
         expiresAt: secret.expiresAt,
@@ -653,8 +744,8 @@ const routes: Route[] = [
         // Ky MOT LAN cho ca buoi. Han 1 tieng, dai hon moi buoi hoc, nen client
         // khong phai hoi lai giua chung — do la ca diem cua viec cap credential
         // thay vi ky tung cau.
-        pollyGrant: await pollyGrantFor(req, session.user_id),
-        avatarUrl: AVATAR_URL,
+        pollyGrant: await pollyGrantFor(req, session.user_id, character),
+        character,
       };
     },
   },
@@ -678,7 +769,9 @@ const routes: Route[] = [
           ...quota,
         });
       }
-      return { pollyGrant: await pollyGrantFor(req, session.user_id) };
+      return {
+        pollyGrant: await pollyGrantFor(req, session.user_id, characterOr(session.character_code)),
+      };
     },
   },
 
@@ -819,6 +912,13 @@ const server = createServer(async (req, res) => {
 
     if (path.startsWith('/api/')) throw new HttpError(404, 'Khong co endpoint nay');
 
+    // Asset Spine cua nhan vat (.skel / .atlas.txt / .png)
+    if (path.startsWith('/character/')) {
+      const rel = normalize(path.slice('/character/'.length));
+      if (rel.startsWith('..')) throw new HttpError(400, 'Duong dan khong hop le');
+      return serveStatic(res, join(CHARACTER_ASSET_DIR, rel));
+    }
+
     // File audio da ghi
     if (path.startsWith('/audio/')) {
       const rel = normalize(path.slice('/audio/'.length));
@@ -839,6 +939,7 @@ const server = createServer(async (req, res) => {
 });
 
 await loadLessons();
+await loadCharacters();
 reschedulePendingCalls();
 server.listen(PORT, () => {
   console.log(`\n  AI Learn (WebRTC) dang chay:  http://localhost:${PORT}\n`);

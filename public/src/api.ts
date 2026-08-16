@@ -1,4 +1,6 @@
 import type {
+  Character,
+  CharacterList,
   Lesson,
   Message,
   PollyGrant,
@@ -58,8 +60,13 @@ export const api = {
 
   listSessions: () => request<SessionListItem[]>('/api/sessions'),
 
-  startSession: (lessonId: string) =>
-    request<{ sessionId: string; lesson: Lesson }>('/api/sessions', json('POST', { lessonId })),
+  listCharacters: () => request<CharacterList>('/api/characters'),
+
+  startSession: (lessonId: string, characterCode?: string) =>
+    request<{ sessionId: string; lesson: Lesson; character: Character }>(
+      '/api/sessions',
+      json('POST', { lessonId, characterCode })
+    ),
 
   getSession: (id: string) => request<SessionDetail>(`/api/sessions/${id}`),
 

@@ -23,6 +23,15 @@
       <div id="quota-notice" class="banner hidden"></div>
 
       <section>
+        <h2>Chọn nhân vật</h2>
+        <p class="meta">
+          Mỗi nhân vật có giọng đọc, tính cách và cách sửa lỗi riêng — đổi nhân vật là đổi cả
+          cách AI nói chuyện, không chỉ đổi giọng.
+        </p>
+        <div id="character-list" class="character-grid"></div>
+      </section>
+
+      <section>
         <h2>Chọn bài học</h2>
         <div id="lesson-list" class="card-grid"></div>
       </section>
@@ -67,7 +76,7 @@
                  avatar đứng im, đây là cách duy nhất phân biệt "dữ liệu không
                  chạy" với "model thiếu morph target". -->
             <details class="viseme-debug">
-              <summary>15 thanh đo viseme</summary>
+              <summary>22 thanh đo viseme</summary>
               <div id="talk-bars" class="viseme-bars"></div>
             </details>
           </div>
@@ -75,29 +84,13 @@
           <details id="voice-panel" class="panel">
             <summary class="panel-head">
               <div class="panel-head-text">
-                <h2>Giọng đọc</h2>
-                <div class="meta">Amazon Polly</div>
+                <h2 id="voice-name">…</h2>
+                <div id="voice-detail" class="meta"></div>
               </div>
               <span class="panel-caret" aria-hidden="true">▾</span>
             </summary>
 
-            <label class="field" for="voice-select">
-              <span>Giọng</span>
-              <select id="voice-select"></select>
-            </label>
-
-            <label class="field" for="engine-select">
-              <span>Engine</span>
-              <select id="engine-select">
-                <option value="neural">neural</option>
-                <option value="standard">standard</option>
-                <option value="long-form">long-form</option>
-              </select>
-            </label>
-            <p class="meta">
-              Không có <code>generative</code>: engine đó không trả speech marks nên
-              không dựng được khẩu hình.
-            </p>
+            <p id="voice-style" class="meta"></p>
 
             <label class="toggle" for="save-audio">
               <input id="save-audio" type="checkbox" />

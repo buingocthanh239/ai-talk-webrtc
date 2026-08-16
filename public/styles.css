@@ -1147,3 +1147,53 @@ button {
     display: none;
   }
 }
+
+/* ─────────────────────────── chọn nhân vật ───────────────────────────── */
+
+.character-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.75rem;
+}
+
+.character-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.45rem;
+  padding: 0.9rem;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.character-card:hover {
+  border-color: var(--accent);
+}
+
+.character-card.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Nhân vật trả phí vẫn hiện — ẩn đi thì không ai biết có gì để mở khoá.
+   Server mới là chỗ chặn thật (402 lúc tạo session). */
+.character-card.locked {
+  opacity: 0.72;
+}
+
+.character-card .meta {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+/* Năm khẩu hình Polly không bao giờ gọi tới — làm mờ để không ai mất buổi
+   chiều đi tìm xem vì sao chúng đứng im. */
+.viseme-bar.unreachable {
+  opacity: 0.35;
+}
