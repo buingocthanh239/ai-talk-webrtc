@@ -1,15 +1,20 @@
 # syntax=docker/dockerfile:1
 
 # Node 24: chay thang file .ts (type stripping mac dinh) va co node:sqlite
-# khong can co --experimental. Doi image xuong Node 22 la ca hai thu do vo hieu.
+# khong can co --experimental. Doi image xuong Node 22 la ca hai thu do vo hieu
+# — vi vay ca ba stage dung chung mot ARG, sua mot cho la sua het.
+ARG NODE_IMAGE=node:24-alpine
 
 # ---------------------------------------------------------------- build
 # Stage nay chi ton tai de chay esbuild ra public/js. Server khong qua day.
-FROM node:24-alpine AS build
+FROM ${NODE_IMAGE} AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci
+# --include=dev vi esbuild nam trong devDependencies. Cache mount giu lai
+# tarball da tai, nen doi lock file chi phai tai phan chenh lech.
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --include=dev --no-audit --no-fund
 
 COPY build.js ./
 COPY shared ./shared
@@ -17,25 +22,35 @@ COPY public ./public
 RUN node build.js
 
 # ---------------------------------------------------------------- runtime
-FROM node:24-alpine AS runtime
+FROM ${NODE_IMAGE} AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production \
     PORT=3000
 
-# package.json khong co "dependencies" nao, nen runtime khong can node_modules.
-# Copy no vao chi de Node doc "type": "module".
+# Runtime khong can node_modules: dependency duy nhat (spine-webgl) la code
+# client, da bi esbuild gop het vao public/js. Copy package.json vao chi de
+# Node doc "type": "module".
 COPY package.json ./
 COPY server ./server
 COPY shared ./shared
 COPY public ./public
+
+# server/index.ts phuc vu /character/* tu thu muc nay (asset Spine ~10mb,
+# de ngoai public/ vi chung nang). Thieu no thi trang van chay nhung avatar
+# 404 — loi chi lo ra tren production.
+COPY character ./character
+
 COPY --from=build /app/public/js ./public/js
 
 # db.ts goi mkdirSync(AUDIO_DIR) luc import, nen thu muc phai ghi duoc boi user
 # `node`. Tao san o day de volume mount vao cung dung chu so huu.
-RUN mkdir -p /app/data/audio && chown -R node:node /app/data
+RUN install -d -o node -g node /app/data /app/data/audio
 
 USER node
+
+# Giu VOLUME du compose da khai bao appdata: `docker run` tran khong co no la
+# mat sqlite + audio moi lan xoa container.
 VOLUME ["/app/data"]
 EXPOSE 3000
 

@@ -1,13 +1,26 @@
+# Luu y ve pattern: Docker khop tu goc context va `*` khong vuot qua `/`.
+# `*.test.ts` chi an file test o thu muc goc — server/db.test.ts van lot vao
+# image. Muon an ca cay thi phai viet `**/`.
+
+# Sinh ra tu build, hoac state luc chay
 node_modules/
-data/
 public/js/
+data/
+
 .git/
 .gitignore
-.env
 .DS_Store
+
+# Bi mat. .env.example khong co gia tri that nhung cung khong can trong image.
+.env
+.env.*
+
+# Ha tang / tai lieu / test — khong co cai nao chay trong container
 Dockerfile
 .dockerignore
 docker-compose.yml
+Makefile
 README.md
 docs/
-*.test.ts
+**/*.test.ts
+tsconfig*.json
