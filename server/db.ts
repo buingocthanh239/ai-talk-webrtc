@@ -33,8 +33,12 @@ export interface SessionRow {
   /** `code` cua nhan vat AI. Rong = buoi hoc tao truoc khi co nhan vat. */
   character_code: string;
   /**
-   * `openai` | `polly`. Rong = buoi hoc tao truoc khi co hai mode; doc qua
-   * `normalizeVoiceMode()` la roi ve `polly`, dung hanh vi cu.
+   * `openai` | `google` | `polly`. Rong = buoi hoc tao truoc khi co cot nay;
+   * doc qua `normalizeVoiceMode()` la roi ve mac dinh hien tai (`google`).
+   *
+   * Khong co migration nao doi gia tri cu: cot nay chi duoc doc ra, khong duoc
+   * so sanh voi hang so nao ngoai `shared/voice-mode.ts`, va buoi hoc da ket thuc
+   * thi mode cua no chi con anh huong toi nut "doc lai" o man tong ket.
    */
   voice_mode: string;
 }
@@ -101,7 +105,7 @@ CREATE TABLE IF NOT EXISTS session (
   hint_count   INTEGER NOT NULL DEFAULT 0,
   summary_json TEXT,
   character_code TEXT NOT NULL DEFAULT '',
-  voice_mode   TEXT NOT NULL DEFAULT ''      -- openai | polly
+  voice_mode   TEXT NOT NULL DEFAULT ''      -- openai | google | polly
 );
 
 CREATE TABLE IF NOT EXISTS message (

@@ -3,3 +3,9 @@ node_modules/
 data/
 .DS_Store
 public/js/
+
+# Service account key cua Google. Khong het han: lo mot lan la lo han, va mot
+# lan `git add -A` la du. Liet ke tung ten thay vi mot glob rong — glob rong nuot
+# ca nhung file JSON that su can commit.
+stt_gg_v2_android_config.json
+google-tts-sa.json

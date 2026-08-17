@@ -82,6 +82,17 @@ test('duong THANG dua dung credential cua backend xuong, khong sinh gi moi', asy
   assert.equal(grant.engine, 'neural');
 });
 
+test('grant mang nhan provider — client re theo no de biet ky kieu gi', async () => {
+  // Tu luc co hai nha TTS thi grant khong con tu noi len minh la cua ai. Thieu
+  // truong nay thi `switch` trong `public/src/tts-client.ts` roi thang xuong het,
+  // va khuc nao cung im lang. tsc chan duoc cho nay, nhung mot dong assert re hon
+  // mot lan debug.
+  const cfg = pollyCredsFromEnv(polly, KEYS);
+  assert.ok(cfg);
+  const grant = await pollyGrant(polly, cfg, { sessionName: 'dev-1', sourceIp: null });
+  assert.equal(grant.provider, 'polly');
+});
+
 test('duong THANG khong co sessionToken — phai VANG MAT chu khong phai chuoi rong', async () => {
   // Client dua vao chinh cho nay de quyet dinh co dua x-amz-security-token vao
   // SignedHeaders hay khong. Mot chuoi rong se lot qua kiem tra do va sinh ra

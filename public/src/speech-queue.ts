@@ -1,6 +1,11 @@
 /**
- * Bien dong text cua AI thanh tieng noi: cat khuc -> Polly -> phat theo dung
+ * Bien dong text cua AI thanh tieng noi: cat khuc -> nha TTS -> phat theo dung
  * thu tu.
+ *
+ * Hang doi nay KHONG BIET dang noi chuyen voi nha nao. Moi khac biet giua Google
+ * va Polly — cach ky, hinh dang than response, status bao het han — nam sau
+ * `tts-client.ts`. Do la co y: file nay da du kho voi bo dem `#generation`, tran
+ * `MAX_IN_FLIGHT` va lich su `emptied`, khong nen them mot chieu bien thien nua.
  *
  * Hang doi nay khong con biet gi ve khau hinh. Avatar tu doc bien do cua chinh
  * the <audio> duoi day (`fake-mouth.ts`), nen khong ai phai chuyen timeline qua
@@ -11,9 +16,9 @@
  * do tre bi che hoan toan sau tieng noi.
  *
  * VI SAO MOT `<audio>` CHU KHONG PHAI HAI:
- * Ban dau thiet ke la cap `<audio>` luan phien de preload khuc ke. Nhung Polly
- * tra ve ca file mp3 mot luc va ta giu no lam Blob trong RAM — khong con gi de
- * "tai truoc" ca. Cai duy nhat con lai la ham nong bo giai ma, vai chuc ms,
+ * Ban dau thiet ke la cap `<audio>` luan phien de preload khuc ke. Nhung ca hai
+ * nha deu tra ve ca file mp3 mot luc va ta giu no lam Blob trong RAM — khong con
+ * gi de "tai truoc" ca. Cai duy nhat con lai la ham nong bo giai ma, vai chuc ms,
  * khong dang de doi lay viec avatar phai bam theo hai element.
  *
  * Rang buoc do gio CUNG hon nhieu: `createMediaElementSource` chi goi duoc MOT
@@ -23,9 +28,9 @@
 
 import { SentenceChunker } from '../../shared/chunk.ts';
 import { waitForPlayback, type PlaybackWait } from '../../shared/playback.ts';
-import { grantUsable, PollyError, synthesize } from './polly-client.ts';
-import type { SynthesisResult } from './polly-client.ts';
-import type { PollyEngine, PollyGrant } from '../../shared/types.ts';
+import { grantUsable, isAuthError, synthesize } from './tts-client.ts';
+import type { SynthesisResult } from './tts-client.ts';
+import type { TtsGrant } from '../../shared/types.ts';
 
 /** Toi da bao nhieu khuc duoc tong hop cung luc. */
 const MAX_IN_FLIGHT = 3;
@@ -45,10 +50,10 @@ export interface SpeechQueueHandlers {
   /** Mot khuc hong. Text da hien roi nen day chi de ghi log. */
   onError: (message: string) => void;
   /**
-   * Xin grant moi khi Polly tra 403 (het han, hoac doi mang nen lech IP).
-   * Tra null nghia la khong xin duoc — thoi khong co tieng.
+   * Xin grant moi khi nha TTS bao het han. Tra null nghia la khong xin duoc —
+   * thoi khong co tieng.
    */
-  refreshGrant: () => Promise<PollyGrant | null>;
+  refreshGrant: () => Promise<TtsGrant | null>;
   /**
    * Mot khuc mp3 da doc xong. Dung khi nguoi hoc bat luu audio cua AI.
    *
@@ -58,8 +63,9 @@ export interface SpeechQueueHandlers {
 }
 
 /**
- * Toc do doc cua Polly neural, ky tu/giay. Cung con so ma `docs/cost.md` muc 4
- * dung de quy doi tien (~165 wpm).
+ * Toc do doc, ky tu/giay. Cung con so ma `docs/cost.md` muc 4 dung de quy doi
+ * tien (~165 wpm). Do tu Polly neural; giong Chirp3-HD cua Google doc xap xi
+ * cung nhip, va sai vai tram ms thi khong ai thay — xem `estimateDuration`.
  */
 const CHARS_PER_SEC = 14;
 
@@ -88,10 +94,7 @@ export class SpeechQueue {
   readonly #on: SpeechQueueHandlers;
   readonly #chunker = new SentenceChunker();
 
-  #grant: PollyGrant | null = null;
-  #voiceId = 'Joanna';
-  #engine: PollyEngine = 'neural';
-  #voiceChosen = false;
+  #grant: TtsGrant | null = null;
   #rate = 1;
 
   #jobs: Job[] = [];
@@ -124,31 +127,16 @@ export class SpeechQueue {
   // ------------------------------------------------------------- cau hinh
 
   /**
-   * Grant mang theo giong mac dinh cua server, nhung chi la diem xuat phat:
-   * nguoi hoc da chon giong thi khong duoc de lan cap grant sau (reconnect,
-   * hoac xin lai vi het han) am tham keo ve mac dinh.
+   * Grant mang theo ca giong cua nhan vat.
+   *
+   * Truoc day hang doi giu `voiceId`/`engine` rieng, khoi tao tu grant roi cho
+   * `setVoice()` de len. Nhung khong co cho nao goi `setVoice` — khong he co bo
+   * chon giong tren man hoc — nen hai nguon su that do chi de lai mot duong lech:
+   * moi lan cap lai grant am tham keo giong ve mac dinh cua server. Gio giong di
+   * theo grant, mot nguon duy nhat.
    */
-  setGrant(grant: PollyGrant | null): void {
+  setGrant(grant: TtsGrant | null): void {
     this.#grant = grant;
-    if (grant && !this.#voiceChosen) {
-      this.#voiceId = grant.voiceId;
-      this.#engine = grant.engine;
-    }
-  }
-
-  /** Doi giong/engine. Ap dung tu khuc KE TIEP — khuc da doc xong thi de yen. */
-  setVoice(voiceId: string, engine: PollyEngine): void {
-    this.#voiceId = voiceId;
-    this.#engine = engine;
-    this.#voiceChosen = true;
-  }
-
-  get voiceId(): string {
-    return this.#voiceId;
-  }
-
-  get engine(): PollyEngine {
-    return this.#engine;
   }
 
   /**
@@ -249,17 +237,17 @@ export class SpeechQueue {
     const grant = this.#grant;
     if (!grant) return null;
 
-    const opts = { voiceId: this.#voiceId, engine: this.#engine, signal };
     try {
-      return await synthesize(grant, text, opts);
+      return await synthesize(grant, text, { signal });
     } catch (err) {
-      // 403 = credential het han, hoac nguoi hoc doi Wi-Fi <-> 4G nen lech IP
-      // so voi luc ky. Xin lai mot lan roi thoi.
-      if (err instanceof PollyError && err.status === 403 && !signal.aborted) {
+      // Credential het han — hoac, o duong Polly, nguoi hoc doi Wi-Fi <-> 4G nen
+      // lech IP so voi luc ky. Hai nha bao chuyen nay bang hai status khac nhau,
+      // va `isAuthError` la cho biet dieu do. Xin lai mot lan roi thoi.
+      if (isAuthError(err) && !signal.aborted) {
         const fresh = await this.#on.refreshGrant();
         if (!fresh) return null;
         this.setGrant(fresh);
-        return await synthesize(fresh, text, opts);
+        return await synthesize(fresh, text, { signal });
       }
       throw err;
     }

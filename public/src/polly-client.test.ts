@@ -19,6 +19,7 @@ import { PollyError, synthesize } from './polly-client.ts';
 import type { PollyGrant } from '../../shared/types.ts';
 
 const GRANT: PollyGrant = {
+  provider: 'polly',
   region: 'ap-southeast-1',
   accessKeyId: 'AKIAEXAMPLE',
   secretAccessKey: 'secret',

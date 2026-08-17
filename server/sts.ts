@@ -292,6 +292,7 @@ export async function assumeRole(
 // ------------------------------------------------------------------ grant
 
 export interface PollyGrantShape {
+  provider: 'polly';
   region: string;
   accessKeyId: string;
   secretAccessKey: string;
@@ -331,6 +332,9 @@ export async function pollyGrant(
 ): Promise<PollyGrantShape> {
   const creds = usesSts(cfg) ? await assumeRole(cfg, opts, at) : directCreds(cfg, at);
   return {
+    // Client re theo truong nay de biet phai ky kieu gi — xem
+    // `public/src/tts-client.ts`.
+    provider: 'polly',
     region: polly.region,
     ...creds,
     voiceId: polly.voiceId,

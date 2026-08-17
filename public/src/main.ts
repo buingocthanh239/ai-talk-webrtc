@@ -4,7 +4,7 @@ import type { PttState, SessionHandlers } from './session.ts';
 // Chi lay KIEU o day. Module that duoc nap bang dynamic import trong
 // mountTalkAvatar(), vi no keo theo runtime Spine — xem build.js.
 import type { TalkAvatar } from './talk-avatar.ts';
-import { synthesize } from './polly-client.ts';
+import { synthesize } from './tts-client.ts';
 
 import type {
   AvatarBundle,
@@ -12,11 +12,11 @@ import type {
   Lesson,
   Message,
   ObjectiveProgress,
-  PollyGrant,
   Quota,
   Role,
   SessionDetail,
   Summary,
+  TtsGrant,
   VoiceMode,
 } from '../../shared/types.ts';
 import { clampSpeed } from '../../shared/speed.ts';
@@ -490,7 +490,11 @@ function renderRoster(): void {
 function renderCharacterBadge(character: Character): void {
   $('voice-name').textContent = character.name;
   $('voice-style').textContent = character.voiceStyle;
-  $('voice-detail').textContent = `${character.voice.voiceId} · ${character.voice.engine}`;
+  // Giong Google la duong mac dinh, nen hien no khi nhan vat co. Roi ve cap
+  // Polly cho nhan vat chua duoc map giong Google.
+  $('voice-detail').textContent = character.voiceGoogle
+    ? character.voiceGoogle.name
+    : `${character.voice.voiceId} · ${character.voice.engine}`;
 }
 
 $<HTMLInputElement>('save-audio').checked = storedSaveAudio();
@@ -505,9 +509,9 @@ $<HTMLInputElement>('save-audio').onchange = (e) => {
  * Bao mode cua buoi dang chay, va noi ro nhung cho mode do hanh xu khac.
  *
  * Cong tac "Luu giong AI" chay o CA BA mode, nhung bang hai co che khac nhau:
- * mode 'polly' gom mp3 tu Polly, hai mode kia ghi thang tu stream WebRTC. Ghi
- * tu stream thi ton mot AudioWorklet chay suot buoi, nen no chi dung khi cong
- * tac bat — do la ly do cau ghi chu ben duoi noi ro cai gia.
+ * hai mode TTS client gom mp3 tu nha TTS, mode 'openai' ghi thang tu stream
+ * WebRTC. Ghi tu stream thi ton mot AudioWorklet chay suot buoi, nen no chi dung
+ * khi cong tac bat — do la ly do cau ghi chu ben duoi noi ro cai gia.
  */
 function renderVoiceModeBadge(mode: VoiceMode): void {
   const box = $<HTMLInputElement>('save-audio');
@@ -1017,10 +1021,10 @@ function renderReplay(body: HTMLElement, session: SessionDetail): void {
       audio.preload = 'none';
       audio.src = m.audioUrl;
       row.append(audio);
-    } else if (m.role === 'assistant' && m.text && session.pollyGrant) {
-      // Khong bat luu mp3 thi khong co file nao ca — doc lai bang Polly ngay
-      // luc bam. Ton them tien moi lan nghe, doi lai buoi hoc khong phai luu gi.
-      row.append(speakAgainButton(m.text, session.pollyGrant, session.character));
+    } else if (m.role === 'assistant' && m.text && session.ttsGrant) {
+      // Khong bat luu mp3 thi khong co file nao ca — doc lai ngay luc bam. Ton
+      // them tien moi lan nghe, doi lai buoi hoc khong phai luu gi.
+      row.append(speakAgainButton(m.text, session.ttsGrant));
     } else {
       row.append(el('div', 'no-audio', 'không có audio'));
     }
@@ -1029,21 +1033,21 @@ function renderReplay(body: HTMLElement, session: SessionDetail): void {
 }
 
 /**
- * Nut doc lai mot cau cua AI bang Polly.
+ * Nut doc lai mot cau cua AI.
  *
  * Chi doc mot lan roi giu lai the <audio>: bam nghe di nghe lai la chuyen binh
- * thuong o man tong ket, va moi lan goi Polly la mot lan tra tien.
+ * thuong o man tong ket, va moi lan goi nha TTS la mot lan tra tien.
  */
-function speakAgainButton(text: string, grant: PollyGrant, character: Character): HTMLElement {
+function speakAgainButton(text: string, grant: TtsGrant): HTMLElement {
   const button = el('button', 'ghost-btn', '🔊 Đọc lại');
 
   button.onclick = async () => {
     (button as HTMLButtonElement).disabled = true;
     button.textContent = 'Đang đọc…';
     try {
-      // Giong cua dung nhan vat da day buoi do, khong phai nhan vat dang chon
-      // o trang chu — nghe lai ma khac giong thi khong con la nghe lai.
-      const { url } = await synthesize(grant, text, character.voice);
+      // Giong di theo GRANT, va server mint grant do theo nhan vat cua chinh
+      // buoi hoc nay — nghe lai ma khac giong thi khong con la nghe lai.
+      const { url } = await synthesize(grant, text, {});
       const audio = el('audio') as HTMLAudioElement;
       audio.controls = true;
       audio.src = url;

@@ -10,6 +10,7 @@
   "greetingStyle": "",
   "speed": 1.0,
   "voice": { "voiceId": "Matthew", "engine": "neural" },
+  "voiceGoogle": { "name": "en-US-Chirp3-HD-Alnilam", "languageCode": "en-US" },
   "openaiVoice": "verse",
   "avatar": { "skeleton": "/character/Marco/Marco.skel", "atlas": "/character/Marco/Marco.atlas.txt" }
 }

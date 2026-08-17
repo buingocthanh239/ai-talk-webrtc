@@ -108,11 +108,11 @@ export interface SessionDetail {
   summary: Summary | null;
   character: Character;
   /**
-   * Cap ngay tai day de man tong ket doc lai cau AI bang Polly ma khong phai
-   * xin them mot vong. Buoi hoc cu thi credential luc hoc da het han tu lau,
-   * nen phai la ban moi chu khong phai ban da luu.
+   * Cap ngay tai day de man tong ket doc lai cau AI ma khong phai xin them mot
+   * vong. Buoi hoc cu thi credential luc hoc da het han tu lau, nen phai la ban
+   * moi chu khong phai ban da luu.
    */
-  pollyGrant: PollyGrant | null;
+  ttsGrant: TtsGrant | null;
 }
 
 export interface SessionListItem {
@@ -188,13 +188,21 @@ export interface Character {
    * Leo 1.05 x slider 0.8 = 0.84.
    */
   speed: number;
+  /** Giong Polly, dung o mode `polly`. */
   voice: { voiceId: string; engine: PollyEngine };
+  /**
+   * Giong Google, dung o mode `google`.
+   *
+   * De trong thi roi ve `GOOGLE_TTS_VOICE` — nghia la ca bon nhan vat noi cung
+   * mot giong, tuc la khong con nhan vat nao. Coi day la phai dien.
+   */
+  voiceGoogle?: { name: string; languageCode: string };
   /**
    * Giong ben OpenAI Realtime, dung o mode `openai`.
    *
-   * Phai la mot truong RIENG chu khong tai su dung `voice.voiceId`: hai nha
-   * cung cap co hai bo ten khong giao nhau (`Ruth` cua Polly vs `coral` cua
-   * OpenAI), gui nham la Realtime API tra 400 ngay luc bat tay.
+   * Phai la mot truong RIENG chu khong tai su dung `voice.voiceId`: ba nha cung
+   * cap co ba bo ten khong giao nhau (`Ruth` cua Polly, `coral` cua OpenAI,
+   * `en-US-Chirp3-HD-Leda` cua Google), gui nham la 400 ngay luc bat tay.
    */
   openaiVoice: string;
   avatar: AvatarBundle | null;
@@ -216,6 +224,7 @@ export interface CharacterList {
  * null nghia la chua cau hinh STS: hoi thoai se khong co tieng noi cua AI.
  */
 export interface PollyGrant {
+  provider: 'polly';
   region: string;
   accessKeyId: string;
   secretAccessKey: string;
@@ -230,6 +239,35 @@ export interface PollyGrant {
   engine: PollyEngine;
 }
 
+/**
+ * Quyen goi Google Cloud TTS, cap mot lan cho ca buoi hoc.
+ *
+ * Nho hon `PollyGrant` nhieu, va do chinh la cai thang: client khong ky gi ca,
+ * chi dan token vao header `Authorization`. Khong con SigV4, khong con doi hoi
+ * secure context.
+ *
+ * Doi lai, token nay KHONG rang duoc vao IP nao va khong siet duoc xuong rieng
+ * quyen doc chu — xem phan canh bao dau `server/google-token.ts`.
+ */
+export interface GoogleTtsGrant {
+  provider: 'google';
+  accessToken: string;
+  expiresAt: number;
+  /** Giong mac dinh cua nhan vat. Google doi CA HAI truong trong moi request. */
+  voice: { name: string; languageCode: string };
+}
+
+/**
+ * Quyen goi mot nha TTS bat ky, phan biet bang `provider`.
+ *
+ * Truong `provider` la thu duy nhat cho client biet phai ky kieu gi va goi vao
+ * dau. No la mot truong THAT tren day, khong phai suy ra tu `voiceMode`: hai gia
+ * tri do di theo hai duong khac nhau (mode nam trong cot SQLite, grant duoc mint
+ * lai moi lan xin) va co that su lech nhau — vd buoi hoc mode `google` nhung
+ * Google chua cau hinh, luc do grant la null chu khong phai grant Polly.
+ */
+export type TtsGrant = PollyGrant | GoogleTtsGrant;
+
 export interface TokenResponse {
   clientSecret: string;
   expiresAt: number;
@@ -237,7 +275,7 @@ export interface TokenResponse {
   seedItems: SeedItem[];
   progress: ProgressRecord[];
   uploadGrant: UploadGrant | null;
-  pollyGrant: PollyGrant | null;
+  ttsGrant: TtsGrant | null;
   /**
    * Nhan vat cua buoi hoc nay. Di kem token chu khong co endpoint rieng: no la
    * nguon duy nhat cho ca giong doc, he so toc do lan asset avatar.

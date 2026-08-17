@@ -3,7 +3,6 @@ import type {
   CharacterList,
   Lesson,
   Message,
-  PollyGrant,
   ProgressRecord,
   Quota,
   Role,
@@ -11,6 +10,7 @@ import type {
   SessionListItem,
   Summary,
   TokenResponse,
+  TtsGrant,
   UploadGrant,
   VoiceMode,
 } from '../../shared/types.ts';
@@ -75,11 +75,11 @@ export const api = {
     request<TokenResponse>(`/api/sessions/${id}/token`, json('POST', { resume })),
 
   /**
-   * Xin lai quyen goi Polly giua buoi hoc — credential het han, hoac doi mang
-   * nen lech IP so voi luc ky.
+   * Xin lai quyen goi nha TTS giua buoi hoc — token het han, hoac (duong Polly)
+   * doi mang nen lech IP so voi luc ky.
    */
-  getPollyGrant: (id: string) =>
-    request<{ pollyGrant: PollyGrant | null }>(`/api/sessions/${id}/polly`, json('POST')),
+  getTtsGrant: (id: string) =>
+    request<{ ttsGrant: TtsGrant | null }>(`/api/sessions/${id}/tts`, json('POST')),
 
   getQuota: () => request<Quota>('/api/quota'),
 

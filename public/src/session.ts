@@ -8,13 +8,12 @@ import type {
   Character,
   Lesson,
   ObjectiveProgress,
-  PollyEngine,
-  PollyGrant,
   ProgressRecord,
   ProgressStatus,
   Quota,
   Role,
   SeedItem,
+  TtsGrant,
   UploadGrant,
   VoiceMode,
 } from '../../shared/types.ts';
@@ -163,7 +162,7 @@ export class LessonSession {
   /** Toc do doc cua AI. Bat dau tu mac dinh cua bai hoc. */
   #speed: number;
 
-  /** Bien text cua AI thanh tieng noi qua Polly. */
+  /** Bien text cua AI thanh tieng noi qua nha TTS (Google, hoac Polly). */
   readonly #speech: SpeechQueue;
 
   /** Nhan vat AI. null cho toi khi bat tay xong. */
@@ -175,7 +174,7 @@ export class LessonSession {
    */
   #voiceMode: VoiceMode = VOICE_MODE_DEFAULT;
 
-  /** Stream cua AI o mode `openai`. null o mode `polly`. */
+  /** Stream cua AI o mode `openai`. null o hai mode TTS client. */
   #remoteStream: MediaStream | null = null;
 
   /**
@@ -183,8 +182,8 @@ export class LessonSession {
    * bat "Luu giong AI" — khong bat thi khong dung recorder nao, va do la ly do
    * no lazy: mot AudioWorklet chay suot buoi khong phai thu dung bat san.
    *
-   * Mode `polly` khong di qua day: tieng AI o do la mp3 tu Polly, duoc gom o
-   * `#collectTurnAudio`.
+   * Hai mode TTS client khong di qua day: tieng AI o do la mp3 tu nha TTS, duoc
+   * gom o `#collectTurnAudio`.
    */
   #aiRec: TrackRecorder | null = null;
   #aiTurnStartMs: number | null = null;
@@ -210,7 +209,7 @@ export class LessonSession {
   /** Message dang duoc doc. Hang doi canh sau `response.done` nen phai nho. */
   #speakingSeq: number | null = null;
 
-  /** Bat thi luu mp3 cua AI len S3; tat thi nghe lai bang cach doc lai Polly. */
+  /** Bat thi luu mp3 cua AI len S3; tat thi nghe lai bang cach doc lai. */
   #saveAiAudio = false;
 
   /** Quyen ghi thang len S3. null = server dang luu audio tren dia. */
@@ -254,7 +253,7 @@ export class LessonSession {
     this.#speech = new SpeechQueue(audioElement, {
       onDrain: () => this.#onSpeechDone(),
       onError: (message) => console.warn('[tts]', message),
-      refreshGrant: () => this.#refreshPollyGrant(),
+      refreshGrant: () => this.#refreshTtsGrant(),
       onAudio: (blob, _text, durationMs) => this.#collectTurnAudio(blob, durationMs),
     });
     this.#speech.setRate(this.#speed);
@@ -277,8 +276,8 @@ export class LessonSession {
   /**
    * Doi toc do doc cua AI.
    *
-   * Mode 'polly': `playbackRate` cua the <audio> — an NGAY, ke ca giua chung
-   * mot cau dang doc.
+   * Mode 'google' / 'polly': `playbackRate` cua the <audio> — an NGAY, ke ca
+   * giua chung mot cau dang doc.
    *
    * Mode 'openai': `audio.output.speed` cua session — an TU LUOT SAU. Realtime
    * API khong co duong nao doi toc do cua audio dang phat, va do la mot phan
@@ -312,26 +311,15 @@ export class LessonSession {
     });
   }
 
-  // ---------------------------------------------------------- giong doc
-
-  /** Doi giong Polly. Ap dung tu khuc ke tiep, khong doc lai khuc dang phat. */
-  setVoice(voiceId: string, engine: PollyEngine): void {
-    this.#speech.setVoice(voiceId, engine);
-  }
-
-  get voiceId(): string {
-    return this.#speech.voiceId;
-  }
-
-  get engine(): PollyEngine {
-    return this.#speech.engine;
-  }
+  // Bo chon giong da bo: khong he co cho nao goi `setVoice`, va giu mot nguon
+  // su that thu hai ben canh grant chi tao ra duong lech. Giong gio di theo
+  // grant — xem `speech-queue.ts`.
 
   /**
    * Bat/tat luu mp3 cua AI len S3.
    *
-   * Tat (mac dinh): khong luu gi, man tong ket doc lai bang Polly — ton tien
-   * moi lan bam nghe, doi lai co luon viseme de xem lai khau hinh.
+   * Tat (mac dinh): khong luu gi, man tong ket doc lai bang nha TTS — ton tien
+   * moi lan bam nghe, doi lai khong ton luu tru.
    * Bat: giu file, nghe lai khong ton them tien nhung ton luu tru.
    */
   setSaveAiAudio(enabled: boolean): void {
@@ -438,7 +426,7 @@ export class LessonSession {
     this.#uploadGrant = token.uploadGrant ?? null;
     // Ky mot lan cho ca buoi. Cap lai o day la du: reconnect di qua chinh
     // duong nay, va han cua grant dai hon moi buoi hoc.
-    this.#speech.setGrant(token.pollyGrant ?? null);
+    this.#speech.setGrant(token.ttsGrant ?? null);
     this.#character = token.character;
     // Server chot mode, khong phai client. Doc lai o moi lan connect vi
     // reconnect di qua chinh duong nay — mode phai giu nguyen ca buoi.
@@ -450,7 +438,7 @@ export class LessonSession {
     }
     this.on.progress(this.progressList());
 
-    // Mode 'polly': KHONG dang ky onRemoteStream — session cau hinh
+    // Hai mode TTS client: KHONG dang ky onRemoteStream — session cau hinh
     // output_modalities:["text"] nen OpenAI khong gui audio ve, va the <audio>
     // thuoc ve SpeechQueue.
     //
@@ -554,19 +542,19 @@ export class LessonSession {
   }
 
   /**
-   * Xin lai quyen goi Polly khi credential het han hoac lech IP (doi Wi-Fi
+   * Xin lai quyen goi nha TTS khi token het han hoac lech IP (doi Wi-Fi
    * sang 4G giua buoi hoc).
    *
    * Duong rieng chu khong goi lai `/token`: `/token` mint mot client secret
    * moi cua OpenAI va dung lai ca ngu canh resume — tat ca deu bi vut di neu
    * thu ta can chi la mot credential AWS.
    */
-  async #refreshPollyGrant(): Promise<PollyGrant | null> {
+  async #refreshTtsGrant(): Promise<TtsGrant | null> {
     if (this.#ended) return null;
     try {
-      return (await api.getPollyGrant(this.sessionId)).pollyGrant;
+      return (await api.getTtsGrant(this.sessionId)).ttsGrant;
     } catch (err) {
-      console.warn('[tts] khong xin lai duoc quyen goi Polly:', errorMessage(err));
+      console.warn('[tts] khong xin lai duoc quyen goi nha TTS:', errorMessage(err));
       return null;
     }
   }
@@ -741,9 +729,9 @@ export class LessonSession {
           this.on.messageUpdate(this.#activeResponse.seq, this.#activeResponse.text);
           // Cat khuc va doc ngay, khong doi het cau tra loi.
           //
-          // Chi o mode 'polly'. Mode 'openai' cung di qua day — chu ve bang
+          // Chi o hai mode TTS client. Mode 'openai' cung di qua day — chu ve bang
           // `output_audio_transcript.delta` — nhung tieng thi OpenAI da phat
-          // roi, day them vao Polly la nghe hai giong chong len nhau.
+          // roi, day them vao hang doi la nghe hai giong chong len nhau.
           if (!aiSpeaksItself(this.#voiceMode)) this.#speech.push(delta);
         }
         break;
@@ -997,7 +985,7 @@ export class LessonSession {
     // `response.done` chi bao model sinh xong CHU. Tieng noi thi con dang phat
     // — nut micro mo lai o #onSpeechDone, va moi mode chot moc do mot kieu:
     //
-    //   'polly'  — hang doi doc canh (SpeechQueue.onDrain).
+    //   TTS client — hang doi doc canh (SpeechQueue.onDrain).
     //   'openai' — event `output_audio_buffer.stopped`.
     //
     // Ca hai deu la su kien CHAC CHAN, khong phai suy doan.
@@ -1251,7 +1239,7 @@ export class LessonSession {
     }
 
     // Duoi file phai khop het voi `audioKey` ben server, khong thi `verifyKey`
-    // tu choi: WAV cho doan ghi cua nguoi hoc, MP3 cho cau Polly doc.
+    // tu choi: WAV cho doan ghi cua nguoi hoc, MP3 cho cau nha TTS doc.
     const ext = role === 'assistant' ? 'mp3' : 'wav';
     const key = `${grant.keyPrefix}${String(seq).padStart(3, '0')}-${role}.${ext}`;
     await retry(() => putAudioToS3(grant, key, blob));

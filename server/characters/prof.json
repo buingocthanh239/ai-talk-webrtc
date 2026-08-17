@@ -10,6 +10,7 @@
   "greetingStyle": "",
   "speed": 1.0,
   "voice": { "voiceId": "Brian", "engine": "neural" },
+  "voiceGoogle": { "name": "en-US-Chirp3-HD-Iapetus", "languageCode": "en-US" },
   "openaiVoice": "sage",
   "avatar": { "skeleton": "/character/Prof/Prof.skel", "atlas": "/character/Prof/Prof.atlas.txt" }
 }

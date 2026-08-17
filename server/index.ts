@@ -10,12 +10,18 @@ import type {
   Character,
   CharacterList,
   Lesson,
-  PollyGrant,
   ProgressRecord,
   Quota,
+  TtsGrant,
   VoiceMode,
 } from '../shared/types.ts';
-import { normalizeVoiceMode } from '../shared/voice-mode.ts';
+import {
+  aiSpeaksItself,
+  clientTtsProvider,
+  effectiveVoiceMode,
+  normalizeVoiceMode,
+  VOICE_MODE_DEFAULT,
+} from '../shared/voice-mode.ts';
 import { clampSpeed } from '../shared/speed.ts';
 
 import * as db from './db.ts';
@@ -27,6 +33,8 @@ import { buildSessionPayload } from './realtime-session.ts';
 import { gradeSession } from './grader.ts';
 import { pollyConfigFromEnv } from './polly.ts';
 import { pollyGrant as mintPollyGrant, pollyCredsFromEnv, usesSts } from './sts.ts';
+import { googleTtsConfigFromEnv } from './google-tts.ts';
+import { googleTokenSource, serviceAccountFromEnv } from './google-token.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC_DIR = join(ROOT, 'public');
@@ -147,6 +155,80 @@ if (pollyCreds && !usesSts(pollyCreds)) {
 }
 
 /**
+ * Google Cloud TTS — duong tieng noi mac dinh. null = chua bat.
+ */
+const googleTts = googleTtsConfigFromEnv();
+
+/**
+ * Service account de ky JWT doi lay access token. Nguon token co cache: token cua
+ * Google song 1 tieng, mint mot cai moi cho tung khuc doc la vua cham vua tu dot
+ * rate limit cua chinh minh.
+ */
+const googleSa = googleTts ? serviceAccountFromEnv() : null;
+const googleTokens = googleSa ? googleTokenSource(googleSa) : null;
+
+if (googleTts && !googleTokens) {
+  console.warn(
+    '  [google-tts] GOOGLE_TTS=on nhung thieu GOOGLE_TTS_SA_FILE / GOOGLE_TTS_SA_JSON —\n' +
+      '               AI se hien chu ma khong co tieng.'
+  );
+}
+
+/** Nha nao that su dung duoc. Buoi hoc xin mode nao cung phai qua day. */
+const ttsAvailable = {
+  polly: Boolean(polly && pollyCreds),
+  google: Boolean(googleTts && googleTokens),
+};
+
+if (googleTokens) {
+  // Token cua Google la bearer token cho CA service account, song 1 tieng, khong
+  // rang duoc vao IP va khong siet duoc xuong rieng quyen doc chu (Cloud TTS
+  // khong co scope nao hep hon `cloud-platform`, va Credential Access Boundary
+  // chi ap cho Cloud Storage). Ba viec chan thiet hai that su deu nam NGOAI code
+  // nay, nen no phai la mot dong log nhin thay duoc chu khong phai mot gia dinh.
+  console.warn(
+    '  [google-tts] Access token gui xuong browser khong rang duoc vao IP va mang\n' +
+      '               du quyen cua service account. Bat buoc: project rieng chi chua\n' +
+      '               TTS, SA khong co quyen gi khac, quota cap + budget alert o cap\n' +
+      '               project.'
+  );
+}
+
+/**
+ * Rate limit cap token theo userId (B4 cua docs/webrtc-migration.md).
+ *
+ * Cai duy nhat trong bon lop bao ve nam duoc trong code. Khong chan duoc nguoi
+ * da cam token trong tay — token nao cung goi Google truc tiep — nhung chan duoc
+ * viec mot thiet bi xin HANG NGHIN token khac nhau, tuc la chan duong bien mot
+ * tai khoan thanh mot voi cap token cong khai.
+ *
+ * Cua so truot don gian trong RAM: mat khi restart, khong chia duoc giua nhieu
+ * instance. Dung muc do do la co y — no chan cai no phai chan, va mot cai
+ * chinh xac hon thi phai co Redis.
+ */
+const TOKEN_RATE_WINDOW_MS = 60_000;
+const TOKEN_RATE_MAX = 20;
+const tokenMints = new Map<string, number[]>();
+
+function allowTokenMint(userId: string): boolean {
+  const now = Date.now();
+  const recent = (tokenMints.get(userId) ?? []).filter((t) => now - t < TOKEN_RATE_WINDOW_MS);
+  if (recent.length >= TOKEN_RATE_MAX) {
+    tokenMints.set(userId, recent);
+    return false;
+  }
+  recent.push(now);
+  tokenMints.set(userId, recent);
+  // Don rac: khong co cho nay thi Map giu moi userId tung ghe qua, vinh vien.
+  if (tokenMints.size > 10_000) {
+    for (const [id, stamps] of tokenMints) {
+      if (stamps.every((t) => now - t >= TOKEN_RATE_WINDOW_MS)) tokenMints.delete(id);
+    }
+  }
+  return true;
+}
+
+/**
  * IP that cua client, de rang credential Polly vao no.
  *
  * `x-forwarded-for` co the la mot chuoi qua nhieu proxy — phan tu DAU la client
@@ -161,14 +243,47 @@ function clientIp(req: IncomingMessage): string | null {
 }
 
 /**
- * Quyen goi Polly cho mot thiet bi. null khi chua cau hinh, hoac khi STS tu
- * choi — hong duong nay khong duoc lam hong ca buoi hoc, AI van hien chu.
+ * Quyen goi nha TTS cho mot thiet bi, theo mode cua buoi hoc.
+ *
+ * null khi chua cau hinh, hoac khi nha do tu choi — hong duong nay khong duoc
+ * lam hong ca buoi hoc, AI van hien chu. Mode `openai` cung tra null: o do AI tu
+ * phat tieng, khong ai can grant.
  */
+async function ttsGrantFor(
+  req: IncomingMessage,
+  userId: string,
+  mode: VoiceMode,
+  character?: Character
+): Promise<TtsGrant | null> {
+  switch (clientTtsProvider(mode)) {
+    case 'google':
+      return googleGrantFor(userId, character);
+    case 'polly':
+      return pollyGrantFor(req, userId, character);
+    default:
+      return null;
+  }
+}
+
+/**
+ * Mode dung cho nut "doc lai" o man tong ket.
+ *
+ * Khac mode cua buoi hoc o mot cho: buoi hoc mode `openai` khong chon nha TTS nao
+ * ca (AI tu noi), nhung man tong ket thi KHONG co stream WebRTC nua — muon nghe
+ * lai mot cau thi phai co mot nha doc no. Nen o day roi ve nha dang chay duoc,
+ * bat ke buoi hoc do da noi bang gi.
+ */
+function replayVoiceMode(stored: string): VoiceMode {
+  const mode = normalizeVoiceMode(stored);
+  const wanted = aiSpeaksItself(mode) ? VOICE_MODE_DEFAULT : mode;
+  return effectiveVoiceMode(wanted, ttsAvailable);
+}
+
 async function pollyGrantFor(
   req: IncomingMessage,
   userId: string,
   character?: Character
-): Promise<PollyGrant | null> {
+): Promise<TtsGrant | null> {
   if (!polly || !pollyCreds) return null;
   try {
     // Giong cua nhan vat de len mac dinh trong env: POLLY_VOICE gio chi con
@@ -180,6 +295,36 @@ async function pollyGrantFor(
     });
   } catch (err) {
     console.warn('[polly] khong cap duoc credential tam:', errorMessage(err));
+    return null;
+  }
+}
+
+/**
+ * Quyen goi Google TTS.
+ *
+ * Khong nhan `req`: token cua Google khong rang duoc vao IP nao (khong co
+ * `aws:SourceIp`, khong co session policy) nen IP cua client khong dung duoc vao
+ * viec gi o day. Do la mat mat that su cua viec doi nha — xem dau
+ * `server/google-token.ts`.
+ */
+async function googleGrantFor(userId: string, character?: Character): Promise<TtsGrant | null> {
+  if (!googleTts || !googleTokens) return null;
+  if (!allowTokenMint(userId)) {
+    console.warn(`[google-tts] ${userId} xin token qua day, tam tu choi.`);
+    return null;
+  }
+  try {
+    const { accessToken, expiresAt } = await googleTokens.token();
+    return {
+      provider: 'google',
+      accessToken,
+      expiresAt,
+      // Giong cua nhan vat de len GOOGLE_TTS_VOICE. Thieu `voiceGoogle` thi ca
+      // bon nhan vat noi cung mot giong — chay duoc, nhung do la phai dien.
+      voice: character?.voiceGoogle ?? googleTts.voice,
+    };
+  } catch (err) {
+    console.warn('[google-tts] khong cap duoc access token:', errorMessage(err));
     return null;
   }
 }
@@ -493,7 +638,153 @@ function reschedulePendingCalls() {
 
 // ---------------------------------------------------------------- routes
 
+/**
+ * Ung vien giong Chirp3-HD de nghe thu.
+ *
+ * KHONG ghi chu nam/nu o day, va do la co y: doan gioi tinh tu ten sao la doan,
+ * ma ca trang nay ton tai chinh vi muc dich khong doan nua. Nghe roi tu xep.
+ */
+const AUDITION_VOICES = [
+  'Achernar', 'Achird', 'Algenib', 'Algieba', 'Alnilam', 'Aoede',
+  'Autonoe', 'Callirrhoe', 'Charon', 'Despina', 'Enceladus', 'Erinome',
+  'Fenrir', 'Gacrux', 'Iapetus', 'Kore', 'Laomedeia', 'Leda',
+  'Orus', 'Puck', 'Pulcherrima', 'Rasalgethi', 'Sadachbia', 'Schedar',
+  'Sulafat', 'Umbriel', 'Vindemiatrix', 'Zephyr',
+];
+
+const escapeHtml = (s: string): string =>
+  s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/**
+ * Trang nghe thu, viet thang thanh HTML.
+ *
+ * Khong nam trong `public/` vi khong muon no di theo bundle cua app: day la mot
+ * cai thuoc do dung mot lan roi tat, khong phai mot phan cua san pham.
+ */
+function auditionPage(): string {
+  const current = [...characters.values()]
+    .sort((a, b) => a.sort - b.sort)
+    .map((c) => `${c.name}: ${c.voiceGoogle?.name ?? '(chua map)'}`)
+    .join(' · ');
+
+  return `<!doctype html>
+<meta charset="utf-8"><title>Nghe thu giong Google</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 46rem; padding: 0 1rem; }
+  h1 { font-size: 1.2rem; }
+  .warn { background: #fff6e5; border-left: 3px solid #e0a000; padding: .6rem .8rem; }
+  textarea { width: 100%; font: inherit; }
+  ul { list-style: none; padding: 0; display: grid; gap: .3rem;
+       grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); }
+  button { font: inherit; cursor: pointer; text-align: left; padding: .4rem .6rem; width: 100%; }
+  #err { color: #b00; white-space: pre-wrap; }
+</style>
+<h1>Nghe thu giong Google Chirp3-HD</h1>
+<p class="warn">Mỗi lần bấm là một lần gọi Google thật và một lần trả tiền.
+Trang này bật bằng <code>GOOGLE_TTS_AUDITION=on</code> — tắt lại khi xong.</p>
+<p><small>Đang map: ${escapeHtml(current)}</small></p>
+<p>Câu đọc thử:</p>
+<textarea id="text" rows="2">Hi! I'm here to help you practise English. What would you like to talk about today?</textarea>
+<p id="err"></p>
+<ul id="list"></ul>
+<script>
+const VOICES = ${JSON.stringify(AUDITION_VOICES)};
+const err = document.getElementById('err');
+let grant = null;
+
+async function ensureGrant() {
+  if (grant && grant.expiresAt - Date.now() > 60000) return grant;
+  const res = await fetch('/dev/voices/grant', { method: 'POST' });
+  const body = await res.json();
+  if (!body.ttsGrant) throw new Error('Server khong cap duoc token. GOOGLE_TTS da bat chua?');
+  grant = body.ttsGrant;
+  return grant;
+}
+
+async function speak(name, button) {
+  err.textContent = '';
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = label + ' …';
+  try {
+    const g = await ensureGrant();
+    const res = await fetch('https://texttospeech.googleapis.com/v1/text:synthesize', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + g.accessToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input: { text: document.getElementById('text').value },
+        voice: { languageCode: 'en-US', name },
+        audioConfig: { audioEncoding: 'MP3' },
+      }),
+    });
+    const body = await res.json();
+    if (!body.audioContent) throw new Error(JSON.stringify(body).slice(0, 300));
+    const bytes = Uint8Array.from(atob(body.audioContent), (c) => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
+    const audio = new Audio(url);
+    await audio.play();
+    audio.onended = () => URL.revokeObjectURL(url);
+  } catch (e) {
+    err.textContent = String(e && e.message ? e.message : e);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+const list = document.getElementById('list');
+for (const short of VOICES) {
+  const name = 'en-US-Chirp3-HD-' + short;
+  const li = document.createElement('li');
+  const button = document.createElement('button');
+  button.textContent = '▶ ' + short;
+  button.onclick = () => speak(name, button);
+  li.append(button);
+  list.append(li);
+}
+</script>`;
+}
+
 const routes: Route[] = [
+  /**
+   * Trang nghe thu giong, de chot mapping giong cho bon nhan vat BANG TAI.
+   *
+   * Ly do ton tai: khong ai chon duoc giong tu mot bang gia. `docs/webrtc-
+   * migration.md` muc 5 ghi thang rui ro "doi TTS = doi giong nhan vat, user cu
+   * nhan ra" va cach xu ly la nghe thu ca bon truoc khi chot — day la cho de lam
+   * viec do trong mot lan ngoi.
+   *
+   * TAT MAC DINH. Moi lan bam la mot lan goi Google that va mot lan tra tien, va
+   * duong nay khong doi session nao ca — no cap grant cho bat cu ai mo duoc URL.
+   * Bat bang `GOOGLE_TTS_AUDITION=on` khi can, roi tat lai.
+   */
+  {
+    method: 'GET',
+    pattern: /^\/dev\/voices$/,
+    handler: (_req, _params, res) => {
+      if ((process.env.GOOGLE_TTS_AUDITION ?? 'off') !== 'on') {
+        throw new HttpError(404, 'Khong co endpoint nay');
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(auditionPage());
+      return HANDLED;
+    },
+  },
+
+  /** Grant de trang nghe thu tu goi Google. Cung mot cong tac voi trang tren. */
+  {
+    method: 'POST',
+    pattern: /^\/dev\/voices\/grant$/,
+    handler: async (req) => {
+      if ((process.env.GOOGLE_TTS_AUDITION ?? 'off') !== 'on') {
+        throw new HttpError(404, 'Khong co endpoint nay');
+      }
+      // Mot id co dinh cho ca trang: rate limit o day chi de mot tab bi ket
+      // trong vong lap khong dot het quota, khong phai de phan biet ai.
+      return { ttsGrant: await googleGrantFor('dev-audition') };
+    },
+  },
+
   {
     method: 'GET',
     pattern: /^\/api\/lessons$/,
@@ -555,7 +846,12 @@ const routes: Route[] = [
       // Chot MOT LAN o day cho ca buoi. Mode khong doi giua chung: doi no la
       // doi output_modalities, ma cai do chi cai lai duoc bang mot lan bat tay
       // WebRTC moi — va nua buoi hoc mot giong cung khong phai thu ai muon.
-      const mode = normalizeVoiceMode(voiceMode);
+      //
+      // Loc qua `effectiveVoiceMode` NGAY TAI DAY, truoc khi ghi vao DB: mot mode
+      // tro toi nha chua cau hinh se lang le khong co tieng (grant null la trang
+      // thai hop le), nen no phai bi doi thanh mode chay duoc truoc khi thanh
+      // thuoc tinh co dinh cua buoi hoc.
+      const mode = effectiveVoiceMode(normalizeVoiceMode(voiceMode), ttsAvailable);
 
       const session = db.createSession(
         randomUUID(),
@@ -676,10 +972,19 @@ const routes: Route[] = [
       const signed = isNativeClient(req);
 
       return {
-        // Nghe lai cau AI bang cach doc lai bang Polly (khi khong bat luu mp3).
-        // Credential cua buoi hoc do da het han tu lau nen phai la ban moi.
+        // Nghe lai cau AI bang cach doc lai (khi khong bat luu mp3). Credential
+        // cua buoi hoc do da het han tu lau nen phai la ban moi.
+        //
+        // Buoi hoc mode `openai` khong co grant nao ca, nen o day xin theo mode
+        // CHAY DUOC gan nhat thay vi mode cua buoi: nut "doc lai" van phai bam
+        // duoc. Buoi hoc cu (cot voice_mode rong) cung roi vao duong nay.
         character: characterOr(session.character_code),
-        pollyGrant: await pollyGrantFor(req, session.user_id, characterOr(session.character_code)),
+        ttsGrant: await ttsGrantFor(
+          req,
+          session.user_id,
+          replayVoiceMode(session.voice_mode),
+          characterOr(session.character_code)
+        ),
         sessionId: session.id,
         status: session.status,
         startedAt: session.started_at,
@@ -729,7 +1034,13 @@ const routes: Route[] = [
       const character = characterOr(session.character_code);
       // Doc tu DB chu khong tu request: mode la thu client khong duoc phep
       // doi giua buoi, cung ly do voi instructions.
-      const voiceMode = normalizeVoiceMode(session.voice_mode);
+      // `effectiveVoiceMode` mot lan nua chu khong tin cot DB: buoi hoc co the da
+      // duoc tao luc Google con bat, roi server restart voi cau hinh khac. Khong
+      // loc lai thi reconnect vao mot buoi nhu vay se im lang.
+      const voiceMode = effectiveVoiceMode(
+        normalizeVoiceMode(session.voice_mode),
+        ttsAvailable
+      );
       const secret = await mintClientSecret({
         lesson,
         progress,
@@ -750,9 +1061,9 @@ const routes: Route[] = [
         // khong phai hoi lai giua chung — do la ca diem cua viec cap credential
         // thay vi ky tung cau.
         //
-        // Cap o CA HAI mode: mode `openai` khong dung Polly de noi trong buoi,
-        // nhung man tong ket van co nut "doc lai" chay bang Polly.
-        pollyGrant: await pollyGrantFor(req, session.user_id, character),
+        // Cap o CA BA mode: mode `openai` khong dung nha TTS nao de noi trong
+        // buoi, nhung man tong ket van co nut "doc lai".
+        ttsGrant: await ttsGrantFor(req, session.user_id, replayVoiceMode(session.voice_mode), character),
         character,
         voiceMode,
       };
@@ -760,15 +1071,18 @@ const routes: Route[] = [
   },
 
   /**
-   * Cap lai rieng quyen goi Polly, khong dung chung duong voi `/token`.
+   * Cap lai rieng quyen goi nha TTS, khong dung chung duong voi `/token`.
    *
-   * Credential rang vao IP nen doi Wi-Fi <-> 4G la no chet — chuyen thuong
-   * ngay tren mobile. Di lai `/token` chi de lay grant thi mint thua mot client
-   * secret cua OpenAI va dung lai ca ngu canh resume, tat ca deu bi vut di.
+   * Grant chet giua buoi la chuyen thuong: token Google song 1 tieng, con
+   * credential Polly thi rang vao IP nen doi Wi-Fi <-> 4G la het — chuyen xay ra
+   * lien tuc tren mobile. Di lai `/token` chi de lay grant thi mint thua mot
+   * client secret cua OpenAI va dung lai ca ngu canh resume, tat ca deu bi vut di.
+   *
+   * Duong cu `/polly` giu nguyen ben duoi de client da cai san khong hong.
    */
   {
     method: 'POST',
-    pattern: /^\/api\/sessions\/([\w-]+)\/polly$/,
+    pattern: /^\/api\/sessions\/([\w-]+)\/(?:tts|polly)$/,
     handler: async (req, [id]) => {
       const { session } = requireSession(id);
       const quota = db.quotaFor(session.user_id);
@@ -779,7 +1093,12 @@ const routes: Route[] = [
         });
       }
       return {
-        pollyGrant: await pollyGrantFor(req, session.user_id, characterOr(session.character_code)),
+        ttsGrant: await ttsGrantFor(
+          req,
+          session.user_id,
+          replayVoiceMode(session.voice_mode),
+          characterOr(session.character_code)
+        ),
       };
     },
   },

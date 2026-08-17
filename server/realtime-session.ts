@@ -42,7 +42,7 @@ export interface SessionPayloadInput {
   resume: ResumeContext | null;
   character: Character;
   voiceMode: VoiceMode;
-  /** Toc do noi ban dau o mode `openai`. Mode `polly` bo qua — xem duoi. */
+  /** Toc do noi ban dau o mode `openai`. Hai mode TTS client bo qua — xem duoi. */
   speed: number;
 }
 
@@ -63,20 +63,26 @@ export function buildSessionPayload({
       model,
       instructions: buildInstructions(lesson, { progress, resume, character }),
 
-      // Hai duong dua tieng AI ra loa, nguoi hoc chon luc bat dau bai:
+      // Ba duong dua tieng AI ra loa, nguoi hoc chon luc bat dau bai:
       //
       //   'openai' — Realtime tu phat audio. Duoc ngu dieu that cua model.
-      //   'polly'  — chi lay CHU ve, client tu goi Amazon Polly doc.
+      //   'google' — chi lay CHU ve, client tu goi Google Cloud TTS doc.
+      //   'polly'  — nhu tren nhung Amazon Polly doc. Giu de lui ve duoc.
       //
-      // MAC DINH LA POLLY, VA DO LA CHUYEN TIEN chu khong phai chuyen ky
-      // thuat: cho OpenAI phat audio truc tiep lam tong hoa don gap ~2,1 lan —
-      // audio out dat gap ~2,9 lan Polly, va giong AI sinh ra con nam lai
-      // trong context de bi doc lai o moi luot sau. Xem `docs/cost.md` muc 6.
+      // MAC DINH LA MOT NHA TTS CLIENT, VA DO LA CHUYEN TIEN chu khong phai
+      // chuyen ky thuat: cho OpenAI phat audio truc tiep lam tong hoa don gap
+      // ~2,1 lan — audio out dat gap ~2,9 lan, va giong AI sinh ra con nam lai
+      // trong context de bi doc lai o moi luot sau. Xem `docs/cost.md` muc 6
+      // (con so o do tinh theo gia Polly, chua tinh lai theo gia Google).
       //
-      // Ly do ban dau cua duong Polly la khau hinh (Realtime khong phat ra
+      // Ly do ban dau cua duong TTS client la khau hinh (Realtime khong phat ra
       // viseme/phoneme nao, con Polly tra thang speech marks). Ly do do da
       // het — avatar gio nhep fake tu bien do audio (`public/src/fake-mouth.ts`)
-      // va khong can Polly noi gi ve am vi ca. Con lai dung mot ly do: tien.
+      // va khong can TTS noi gi ve am vi ca. Con lai dung mot ly do: tien.
+      //
+      // Google KHONG co gi tuong duong speech marks cua Polly, nen neu mot ngay
+      // quay lai day phat am bang hinh mieng thi duong do khong con mo lai duoc
+      // bang cach doi mode — do la chi phi chim cua viec doi nha.
       //
       // Push-to-talk nen mode nao cung khong mat gi ve ngat loi — khong co
       // barge-in de mat.
@@ -107,9 +113,9 @@ export function buildSessionPayload({
           // tha nut. Bat VAD lai la AI se tu noi khi nghe thay tieng vong loa.
           turn_detection: null,
         },
-        // Mode 'polly': khong co nhanh `output` — giong va toc do thuoc ve
-        // Polly, va toc do la `playbackRate` cua the <audio> nen doi duoc GIUA
-        // CHUNG mot cau.
+        // Hai mode TTS client: khong co nhanh `output` — giong va toc do thuoc
+        // ve nha TTS, va toc do la `playbackRate` cua the <audio> nen doi duoc
+        // GIUA CHUNG mot cau.
         //
         // Mode 'openai': toc do la cau hinh session, nen doi duoc nhung chi an
         // TU LUOT SAU. Client van gui `session.update` khi keo slider — xem

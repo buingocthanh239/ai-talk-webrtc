@@ -15,6 +15,7 @@
  */
 
 import type { PollyGrant, PollyEngine } from "../../shared/types.ts";
+import type { SynthesisResult } from "./tts-client.ts";
 
 const ALGORITHM = "AWS4-HMAC-SHA256";
 const SERVICE = "polly";
@@ -240,12 +241,6 @@ async function callPolly(
   }
 }
 
-export interface SynthesisResult {
-  /** Blob URL cua mp3. Ben goi phai `URL.revokeObjectURL` khi xong. */
-  url: string;
-  blob: Blob;
-}
-
 export interface SynthesizeOptions {
   voiceId: string;
   engine: PollyEngine;
@@ -306,8 +301,6 @@ export async function synthesize(
   return { url: URL.createObjectURL(blob), blob };
 }
 
-/** Con han it hon nguong nay thi coi nhu sap chet, xin cai moi truoc. */
-const EXPIRY_MARGIN_MS = 60_000;
-
-export const grantUsable = (grant: PollyGrant | null): grant is PollyGrant =>
-  Boolean(grant && grant.expiresAt - Date.now() > EXPIRY_MARGIN_MS);
+// `grantUsable` va viec phan loai loi het han da chuyen sang `tts-client.ts`:
+// chung phai tra loi cho CA HAI nha, va cau tra loi cua hai nha khong giong nhau
+// (Polly het han la 403, Google la 401).
