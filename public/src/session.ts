@@ -16,8 +16,10 @@ import type {
   Role,
   SeedItem,
   UploadGrant,
+  VoiceMode,
 } from '../../shared/types.ts';
 import { clampSpeed } from '../../shared/speed.ts';
+import { aiSpeaksItself, VOICE_MODE_DEFAULT } from '../../shared/voice-mode.ts';
 
 /** Trang thai nut push-to-talk. Chi 'ready' moi cho bat dau noi. */
 export type PttState = 'locked' | 'ready' | 'recording' | 'thinking' | 'ai';
@@ -51,6 +53,13 @@ export interface SessionHandlers {
   quotaExhausted?: () => void;
   /** Nhan vat cua buoi hoc. Goi mot lan khi bat tay xong. */
   character?: (character: Character) => void;
+  /**
+   * Mode da chot cho buoi nay, kem stream cua AI khi AI tu phat tieng.
+   *
+   * Goi sau moi lan bat tay (ke ca reconnect). `stream` la null o mode `polly`
+   * — luc do tieng AI di ra tu the <audio> cua SpeechQueue chu khong tu WebRTC.
+   */
+  voiceMode?: (mode: VoiceMode, stream: MediaStream | null) => void;
 }
 
 /** Mot luot noi dang cho: moc thoi gian trong recorder de cat WAV ve sau. */
@@ -72,6 +81,15 @@ const BACKOFF_MS = [800, 2000, 4000, 8000, 15000];
 
 /** Do tre truoc khi commit, de goi audio cuoi kip di het qua WebRTC. */
 const PTT_TAIL_MS = 300;
+
+/**
+ * Do tre truoc khi chot duoi luot AI, khi ghi lai tieng AI.
+ *
+ * Cung ly do voi PTT_TAIL_MS nhung nguoc chieu: `output_audio_buffer.stopped`
+ * noi ve luc server gui xong, jitter buffer ben nay con phat not.
+ */
+const AI_TAIL_MS = 400;
+
 /** Doan ngan hon nguong nay coi nhu bam nham — khong gui. */
 const PTT_MIN_MS = 300;
 
@@ -152,6 +170,35 @@ export class LessonSession {
   #character: Character | null = null;
 
   /**
+   * Duong dua tieng AI ra loa. Server chot, client chi doc — xem
+   * `shared/voice-mode.ts`. Giu mac dinh cho toi khi bat tay xong.
+   */
+  #voiceMode: VoiceMode = VOICE_MODE_DEFAULT;
+
+  /** Stream cua AI o mode `openai`. null o mode `polly`. */
+  #remoteStream: MediaStream | null = null;
+
+  /**
+   * Ghi tieng AI tu stream WebRTC. Chi dung khi AI tu phat tieng VA nguoi hoc
+   * bat "Luu giong AI" — khong bat thi khong dung recorder nao, va do la ly do
+   * no lazy: mot AudioWorklet chay suot buoi khong phai thu dung bat san.
+   *
+   * Mode `polly` khong di qua day: tieng AI o do la mp3 tu Polly, duoc gom o
+   * `#collectTurnAudio`.
+   */
+  #aiRec: TrackRecorder | null = null;
+  #aiTurnStartMs: number | null = null;
+
+  /**
+   * Mode `openai`: server dang gui audio cho luot nay.
+   *
+   * Can no vi `output_audio_buffer.stopped` chi den khi CO audio. Luot chi goi
+   * tool, hoac response bi huy, thi khong co event nao ca — va neu chi ngoi doi
+   * no thi nut micro khoa vinh vien.
+   */
+  #outputAudioActive = false;
+
+  /**
    * Cac khuc mp3 cua luot AI dang noi, gom lai de day len S3 khi bat luu.
    *
    * Mot luot noi bi cat thanh nhieu khuc nhung chi ung voi MOT message, nen
@@ -217,6 +264,10 @@ export class LessonSession {
     return this.#character;
   }
 
+  get voiceMode(): VoiceMode {
+    return this.#voiceMode;
+  }
+
   // -------------------------------------------------------- toc do AI doc
 
   get speed(): number {
@@ -226,9 +277,12 @@ export class LessonSession {
   /**
    * Doi toc do doc cua AI.
    *
-   * Truoc day day la `session.update` cua Realtime API, von chi doi duoc GIUA
-   * cac luot nen phai xep hang cho toi khi nut micro mo lai. Gio no la
-   * `playbackRate` cua the <audio>, doi duoc ngay ca giua chung mot cau.
+   * Mode 'polly': `playbackRate` cua the <audio> — an NGAY, ke ca giua chung
+   * mot cau dang doc.
+   *
+   * Mode 'openai': `audio.output.speed` cua session — an TU LUOT SAU. Realtime
+   * API khong co duong nao doi toc do cua audio dang phat, va do la mot phan
+   * cai gia cua mode nay.
    *
    * Tra ve gia tri that su duoc dat (da chan trong 0.25–1.5).
    */
@@ -245,7 +299,17 @@ export class LessonSession {
    * nguoi hoc chinh. Nen no nhan vao chu khong de len.
    */
   #applyRate(): void {
-    this.#speech.setRate(this.#speed * (this.#character?.speed ?? 1));
+    const rate = clampSpeed(this.#speed * (this.#character?.speed ?? 1));
+
+    if (!aiSpeaksItself(this.#voiceMode)) {
+      this.#speech.setRate(rate);
+      return;
+    }
+
+    this.#conn?.send({
+      type: 'session.update',
+      session: { type: 'realtime', audio: { output: { speed: rate } } },
+    });
   }
 
   // ---------------------------------------------------------- giong doc
@@ -272,6 +336,11 @@ export class LessonSession {
    */
   setSaveAiAudio(enabled: boolean): void {
     this.#saveAiAudio = enabled;
+    // Bat giua buoi thi dung recorder ngay. Tat thi KHONG go: `TrackRecorder`
+    // khong dung lai roi chay tiep duoc, va bat/tat vai lan trong mot buoi la
+    // chuyen thuong — go rong roi dung lai moi lan la dat hon nhieu so voi de
+    // no chay khong. Luot nao khong luu thi don gian la khong cat.
+    void this.#ensureAiRecorder();
   }
 
   get saveAiAudio(): boolean {
@@ -371,9 +440,9 @@ export class LessonSession {
     // duong nay, va han cua grant dai hon moi buoi hoc.
     this.#speech.setGrant(token.pollyGrant ?? null);
     this.#character = token.character;
-    // He so toc do cua nhan vat nhan voi slider — phai ap lai sau khi biet
-    // nhan vat, neu khong luot dau tien se doc bang toc do cua nguoi khac.
-    this.#applyRate();
+    // Server chot mode, khong phai client. Doc lai o moi lan connect vi
+    // reconnect di qua chinh duong nay — mode phai giu nguyen ca buoi.
+    this.#voiceMode = token.voiceMode;
     this.on.character?.(token.character);
 
     for (const p of token.progress ?? []) {
@@ -381,17 +450,33 @@ export class LessonSession {
     }
     this.on.progress(this.progressList());
 
-    // Khong dang ky onRemoteStream: session cau hinh output_modalities:["text"]
-    // nen OpenAI khong gui audio ve nua. The <audio> gio thuoc ve SpeechQueue.
+    // Mode 'polly': KHONG dang ky onRemoteStream — session cau hinh
+    // output_modalities:["text"] nen OpenAI khong gui audio ve, va the <audio>
+    // thuoc ve SpeechQueue.
+    //
+    // Mode 'openai': stream cua OpenAI cam thang vao chinh the <audio> do.
+    // Mot the cho ca hai mode la co y: `fake-mouth.ts` chi tao duoc DUNG MOT
+    // source node tren mot the, vinh vien.
     this.#conn = new RealtimeConnection({
       onEvent: (e) => this.#handleEvent(e),
       onDisconnect: (state) => this.#handleDisconnect(state),
+      onRemoteStream:
+        aiSpeaksItself(this.#voiceMode) ? (stream) => this.#attachRemote(stream) : undefined,
     });
 
     await this.#conn.connect({
       clientSecret: token.clientSecret,
       micStream: this.#micStream!,
     });
+
+    // He so toc do cua nhan vat nhan voi slider — phai ap lai sau khi biet
+    // nhan vat, neu khong luot dau tien se doc bang toc do cua nguoi khac.
+    //
+    // Sau connect() chu khong truoc: mode 'openai' gui toc do bang
+    // `session.update` qua data channel, ma truoc bat tay thi chua co kenh nao.
+    this.#applyRate();
+
+    if (!aiSpeaksItself(this.#voiceMode)) this.on.voiceMode?.(this.#voiceMode, null);
 
     // Push-to-talk: mic im cho toi khi user giu nut. Track van nam trong
     // WebRTC (chi phat ra khoang lang) nen bat/tat khong phai thuong luong
@@ -401,6 +486,71 @@ export class LessonSession {
     await this.#registerCall();
 
     if (resume) await this.#seedConversation(token.seedItems);
+  }
+
+  /**
+   * Mode 'openai': cam stream cua OpenAI vao the <audio>.
+   *
+   * `srcObject` chu khong phai `src`: day la stream song, khong co file nao de
+   * tai. Keo theo hai he qua ma cho khac trong file nay dua vao —
+   *
+   *   - `playbackRate` khong con nghia gi, nen toc do phai di bang
+   *     `session.update` (xem #applyRate).
+   *   - the <audio> khong bao gio phat `ended`, nen "AI noi xong" phai lay tu
+   *     event `output_audio_buffer.stopped` (xem #handleEvent).
+   */
+  #attachRemote(stream: MediaStream): void {
+    this.#remoteStream = stream;
+    this.audioElement.srcObject = stream;
+    // Bi chan autoplay thi im tieng ma khong co loi nao trong console. Buoi hoc
+    // luon bat dau bang mot cu bam nut nen gan nhu khong xay ra, con neu co
+    // that thi ghi log con hon im lang.
+    this.audioElement.play().catch((err) => console.warn('[audio]', errorMessage(err)));
+    void this.#ensureAiRecorder();
+    this.on.voiceMode?.(this.#voiceMode, stream);
+  }
+
+  /**
+   * Dung recorder cho tieng AI, neu can va neu chua co.
+   *
+   * Goi tu hai cho: luc cam stream (nguoi hoc da bat san cong tac), va luc
+   * nguoi hoc bat cong tac giua buoi. Khong bat thi khong co AudioWorklet nao
+   * chay cho AI ca.
+   */
+  async #ensureAiRecorder(): Promise<void> {
+    if (this.#aiRec || !this.#saveAiAudio) return;
+    if (!this.#remoteStream || !this.#ctx) return;
+    try {
+      this.#aiRec = await TrackRecorder.create(this.#ctx, this.#remoteStream);
+    } catch (err) {
+      // Ghi lai tieng AI la tien ich, khong phai duong song cua buoi hoc.
+      console.warn('[audio] khong dung duoc recorder cho tieng AI:', errorMessage(err));
+    }
+  }
+
+  /**
+   * Cat luot AI vua noi xong thanh WAV va day len.
+   *
+   * `output_audio_buffer.stopped` noi ve luc SERVER gui xong, con tai nguoi hoc
+   * thi jitter buffer con dang phat not — cat ngay tai moc do se hut mat duoi
+   * cau. Doi mot nhip roi moi chot, giong het `PTT_TAIL_MS` ben phia user.
+   *
+   * Khong `await` o cho goi: nut micro phai mo ngay khi `stopped` toi, khong
+   * cho phan cat.
+   */
+  #cutAiTurn(seq: number | null): void {
+    const rec = this.#aiRec;
+    const startMs = this.#aiTurnStartMs;
+    this.#aiTurnStartMs = null;
+    // `#saveAiAudio` phai hoi lai o day chu khong chi luc dung recorder:
+    // recorder da chay thi khong go, nen tat cong tac giua buoi ma khong hoi
+    // lai la van luu tiep.
+    if (!rec || !this.#saveAiAudio || startMs === null || seq === null) return;
+
+    void sleep(AI_TAIL_MS).then(() => {
+      if (this.#stopped) return;
+      void this.#cutAndUpload({ seq, rec, startMs, endMs: rec.nowMs() }, 'assistant');
+    });
   }
 
   /**
@@ -508,6 +658,13 @@ export class LessonSession {
     this.#closePresence();
     this.#conn?.close();
 
+    // Mode 'openai': go stream ra khoi the <audio>. Khong go thi track da chet
+    // van treo o do va the <audio> ket o trang thai dang phat mai mai.
+    if (this.#remoteStream) {
+      this.audioElement.srcObject = null;
+      this.#remoteStream = null;
+    }
+
     // Dong ban ghi ngay thay vi de server doi het an han — dung gio cua user
     // vao dung luc user thoi goi.
     if (this.#callId) {
@@ -529,6 +686,8 @@ export class LessonSession {
     ]);
 
     this.#micRec?.stop();
+    this.#aiRec?.stop();
+    this.#aiRec = null;
     this.#micStream?.getTracks().forEach((t) => t.stop());
     await this.#ctx?.close().catch(() => {});
   }
@@ -581,8 +740,35 @@ export class LessonSession {
           this.#activeResponse.text += delta;
           this.on.messageUpdate(this.#activeResponse.seq, this.#activeResponse.text);
           // Cat khuc va doc ngay, khong doi het cau tra loi.
-          this.#speech.push(delta);
+          //
+          // Chi o mode 'polly'. Mode 'openai' cung di qua day — chu ve bang
+          // `output_audio_transcript.delta` — nhung tieng thi OpenAI da phat
+          // roi, day them vao Polly la nghe hai giong chong len nhau.
+          if (!aiSpeaksItself(this.#voiceMode)) this.#speech.push(delta);
         }
+        break;
+
+      // Hai event nay CHI co tren WebRTC, va chi o mode 'openai'.
+      //
+      // `stopped` la moc "AI noi xong" — server da xa het buffer audio, khong
+      // con gi gui nua. Day la thu duong audio cu khong bao gio co: no phai
+      // DOAN moc do bang mot vong do im lang 12 giay tren track, cong mot tran
+      // an toan 8 giay phong khi doan truot.
+      //
+      // Con lech mot khoang: `stopped` noi ve luc SERVER gui xong, con tai
+      // nguoi hoc thi jitter buffer con phat not vai chuc ms. Nho hon nhieu so
+      // voi sai so cua vong do im lang, va doi lai khong ton CPU nao.
+      case 'output_audio_buffer.started':
+        this.#outputAudioActive = true;
+        this.#aiTurnStartMs = this.#aiRec?.nowMs() ?? null;
+        break;
+
+      case 'output_audio_buffer.stopped':
+      case 'output_audio_buffer.cleared':
+        this.#outputAudioActive = false;
+        // Cat doan truoc khi #onSpeechDone xoa #speakingSeq di.
+        this.#cutAiTurn(this.#speakingSeq);
+        this.#onSpeechDone();
         break;
 
       case 'response.output_text.done':
@@ -776,6 +962,9 @@ export class LessonSession {
 
     this.#setPttState('ai');
     this.on.speaking('ai');
+    // Luot moi, buffer audio chua chay. Dat lai o day chu khong tin vao lan
+    // truoc: mot response bi huy giua chung co the de co bang true.
+    this.#outputAudioActive = false;
 
     const seq = ++this.#seq;
     this.#activeResponse = { id: response?.id, seq, text: '' };
@@ -805,12 +994,21 @@ export class LessonSession {
     if (!entry.text) entry.text = extractTranscript(response) ?? '';
     this.on.messageUpdate(entry.seq, entry.text, { pending: false });
 
-    // `response.done` chi bao model sinh xong CHU. Tieng noi thi con dang lan
-    // luot doc va phat — nut micro mo lai o #onSpeechDone, khi hang doi canh.
+    // `response.done` chi bao model sinh xong CHU. Tieng noi thi con dang phat
+    // — nut micro mo lai o #onSpeechDone, va moi mode chot moc do mot kieu:
     //
-    // Duong cu phai DOAN moc do bang cach do im lang tren track WebRTC, vi
-    // audio van dang bay ve. Gio thi biet chinh xac.
-    this.#speech.end();
+    //   'polly'  — hang doi doc canh (SpeechQueue.onDrain).
+    //   'openai' — event `output_audio_buffer.stopped`.
+    //
+    // Ca hai deu la su kien CHAC CHAN, khong phai suy doan.
+    if (!aiSpeaksItself(this.#voiceMode)) {
+      this.#speech.end();
+    } else if (!this.#outputAudioActive) {
+      // Luot khong sinh ra audio nao (chi goi tool, hoac response rong): se
+      // khong co `output_audio_buffer.stopped` de doi. Mo nut ngay, neu khong
+      // la khoa vinh vien.
+      this.#onSpeechDone();
+    }
 
     await api
       .saveMessage(this.sessionId, { seq: entry.seq, role: 'assistant', text: entry.text })

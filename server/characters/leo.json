@@ -11,5 +11,6 @@
   "greetingStyle": "Greet the learner enthusiastically, reassure them that mistakes are okay, then invite them into the lesson.",
   "speed": 1.05,
   "voice": { "voiceId": "Joanna", "engine": "neural" },
+  "openaiVoice": "alloy",
   "avatar": { "skeleton": "/character/Leo/Leo.skel", "atlas": "/character/Leo/Leo.atlas.txt" }
 }

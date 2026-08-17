@@ -6,6 +6,11 @@
  * server ma quen sua client thi phai den luc chay moi biet.
  */
 
+// Xuat lai de cho goi chi phai import mot cho. Dinh nghia va ham chan gia tri
+// la nam o `shared/voice-mode.ts` — file nay chi chua kieu, khong chua logic.
+export type { VoiceMode } from './voice-mode.ts';
+import type { VoiceMode } from './voice-mode.ts';
+
 export interface Objective {
   id: string;
   text: string;
@@ -184,6 +189,14 @@ export interface Character {
    */
   speed: number;
   voice: { voiceId: string; engine: PollyEngine };
+  /**
+   * Giong ben OpenAI Realtime, dung o mode `openai`.
+   *
+   * Phai la mot truong RIENG chu khong tai su dung `voice.voiceId`: hai nha
+   * cung cap co hai bo ten khong giao nhau (`Ruth` cua Polly vs `coral` cua
+   * OpenAI), gui nham la Realtime API tra 400 ngay luc bat tay.
+   */
+  openaiVoice: string;
   avatar: AvatarBundle | null;
 }
 
@@ -230,4 +243,11 @@ export interface TokenResponse {
    * nguon duy nhat cho ca giong doc, he so toc do lan asset avatar.
    */
   character: Character;
+  /**
+   * Duong dua tieng AI ra loa cua buoi hoc nay. Nguon la cot `voice_mode` cua
+   * session chu khong phai thu client gui len — client doc localStorage de VE
+   * nut chon, nhung thu chot la day, va no khong doi giua buoi (reconnect va
+   * resume deu di lai duong nay).
+   */
+  voiceMode: VoiceMode;
 }

@@ -221,9 +221,21 @@ const FFT_SIZE = 1024;
  * Con `playbackRate` 0.5x thi khong phai lo: chinh the <audio> gian thoi gian
  * (va `preservesPitch` giu cao do), WebAudio chi cam vao SAU do — nen mom tu
  * cham theo, khong phai tinh lai gi.
+ *
+ * HAI KIEU VOI, tuy mode giong cua buoi hoc:
+ *
+ *   'polly'  — voi vao THE <audio>, va phai noi tiep toi `destination` (bay 1).
+ *   'openai' — voi vao chinh MediaStream cua WebRTC, va TUYET DOI khong noi
+ *              toi `destination`: the <audio> dang phat stream do roi, noi
+ *              them la nghe dup.
+ *
+ * Kieu thu hai khong phai chuyen thich thi doi: `createMediaElementSource` tren
+ * mot the dang chay `srcObject` doc ve toan 0 tren Chrome — mom se dung im ma
+ * tai van nghe thay tieng, dung bieu hien cua bay 3 nen rat de chan doan nham.
  */
 export class FakeMouthPlayer {
   readonly #audio: HTMLAudioElement;
+  readonly #stream: MediaStream | null;
   readonly #on: FakeMouthHandlers;
   readonly #mouth = new FakeMouth();
 
@@ -237,8 +249,13 @@ export class FakeMouthPlayer {
     void this.#ctx?.resume().catch(() => {});
   };
 
-  constructor(audio: HTMLAudioElement, handlers: FakeMouthHandlers) {
+  constructor(
+    audio: HTMLAudioElement,
+    handlers: FakeMouthHandlers,
+    { stream = null }: { stream?: MediaStream | null } = {}
+  ) {
     this.#audio = audio;
+    this.#stream = stream;
     this.#on = handlers;
   }
 
@@ -273,14 +290,23 @@ export class FakeMouthPlayer {
   #tap(): void {
     try {
       const ctx = new AudioContext();
-      // Chuoi source -> analyser -> destination. Cho analyser NAM TRONG duong
-      // ra chu khong treo mot nhanh rieng: mot nhanh khong noi toi destination
-      // co the khong duoc do thi keo qua, va luc do bien do doc ve toan 0.
-      const source = ctx.createMediaElementSource(this.#audio);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = FFT_SIZE;
-      source.connect(analyser);
-      analyser.connect(ctx.destination);
+
+      if (this.#stream) {
+        // Mode 'openai'. Nhanh cut, khong noi toi destination — the <audio> lo
+        // phan phat. Rieng voi MediaStream thi nhanh cut van duoc do thi keo,
+        // vi nguon la mot track song chu khong phai mot node cho duoc keo.
+        ctx.createMediaStreamSource(this.#stream).connect(analyser);
+      } else {
+        // Mode 'polly'. Chuoi source -> analyser -> destination. Cho analyser
+        // NAM TRONG duong ra chu khong treo mot nhanh rieng: mot nhanh khong
+        // noi toi destination co the khong duoc do thi keo qua, va luc do bien
+        // do doc ve toan 0.
+        const source = ctx.createMediaElementSource(this.#audio);
+        source.connect(analyser);
+        analyser.connect(ctx.destination);
+      }
 
       this.#ctx = ctx;
       this.#analyser = analyser;

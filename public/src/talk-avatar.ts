@@ -35,6 +35,11 @@ export interface TalkAvatarOptions {
   bars: HTMLElement;
   /** Chinh la the <audio> ma SpeechQueue dang phat. */
   audio: HTMLAudioElement;
+  /**
+   * Mode 'openai': stream cua OpenAI. Bien do doc tu day chu khong tu the
+   * <audio> — xem dau `fake-mouth.ts`. null o mode 'polly'.
+   */
+  stream?: MediaStream | null;
   /** null = nhan vat chua co asset Spine. */
   bundle: AvatarBundle | null;
 }
@@ -47,6 +52,7 @@ export async function createTalkAvatar({
   note,
   bars,
   audio,
+  stream = null,
   bundle,
 }: TalkAvatarOptions): Promise<TalkAvatar> {
   const fills = new Map<VisemeId | typeof LEVEL_LABEL, HTMLElement>();
@@ -108,14 +114,18 @@ export async function createTalkAvatar({
     }
   };
 
-  const player = new FakeMouthPlayer(audio, {
-    onMouth: (frame) => {
-      // Rig chua tai duoc thi bo qua, thanh do van chay — do la ca diem cua
-      // viec tach hai nhanh nay.
-      if (loaded) avatar.playViseme(frame.id, frame.weight);
-      paint(frame);
+  const player = new FakeMouthPlayer(
+    audio,
+    {
+      onMouth: (frame) => {
+        // Rig chua tai duoc thi bo qua, thanh do van chay — do la ca diem cua
+        // viec tach hai nhanh nay.
+        if (loaded) avatar.playViseme(frame.id, frame.weight);
+        paint(frame);
+      },
     },
-  });
+    { stream }
+  );
 
   player.start();
 

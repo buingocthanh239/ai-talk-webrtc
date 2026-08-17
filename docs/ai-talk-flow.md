@@ -13,18 +13,32 @@ Chỗ nào mobile phải làm khác web đều được ghi chú bằng `Note ov
 
 ## Hai điều phải biết trước khi đọc diagram nào
 
-**1. Tiếng nói của AI không đến từ OpenAI.** Session chạy `output_modalities: ["text"]` — OpenAI chỉ
-nghe audio và trả về chữ. Client gom chữ thành từng khúc, tự ký SigV4 và gọi thẳng Amazon Polly để
-lấy mp3, rồi tự phát qua một thẻ `<audio>`.
+**1. Tiếng nói của AI có hai đường, người học chọn lúc bắt đầu bài.** Mode khoá cho cả buổi ở cột
+`session.voice_mode`; server chốt, client chỉ đọc lại từ token (`shared/voice-mode.ts`).
 
-> Lý do **ban đầu** là khẩu hình: Realtime API không phát ra viseme nào, còn Polly trả speech marks.
-> Lý do đó **đã hết** — avatar giờ nhép fake từ biên độ audio ([mục 6](#6-avatar-nhép-mồm--fake-từ-biên-độ)),
-> không hỏi Polly gì về âm vị nữa. Nhưng quyết định thì không đổi, vì lý do **còn lại** mới là lý do
-> lớn: **tiền**. Cho OpenAI phát audio trực tiếp làm tổng hoá đơn tăng ~2,1 lần — xem
+- **`polly` (mặc định)** — session chạy `output_modalities: ["text"]`, OpenAI chỉ nghe audio và trả
+  về chữ. Client gom chữ thành từng khúc, tự ký SigV4 và gọi thẳng Amazon Polly để lấy mp3, rồi tự
+  phát qua một thẻ `<audio>`.
+- **`openai`** — session chạy `output_modalities: ["audio"]` kèm `audio.output.{voice, speed}`.
+  OpenAI phát audio về bằng media track, client cắm thẳng track đó vào **chính thẻ `<audio>` đó**
+  bằng `srcObject`. Một thẻ cho cả hai mode là cố ý: `fake-mouth.ts` chỉ tạo được đúng một source
+  node trên một thẻ, vĩnh viễn.
+
+> Vì sao `polly` là mặc định: lý do **ban đầu** là khẩu hình (Realtime API không phát ra viseme nào,
+> còn Polly trả speech marks). Lý do đó **đã hết** — avatar giờ nhép fake từ biên độ audio
+> ([mục 6](#6-avatar-nhép-mồm--fake-từ-biên-độ)), không hỏi Polly gì về âm vị nữa. Còn lại đúng một
+> lý do, và nó là lý do lớn: **tiền**. Mode `openai` làm tổng hoá đơn tăng ~2,1 lần — xem
 > [`cost.md`](cost.md) mục 6.
 
-Hệ quả trong tài liệu này: không có media track chiều về, không có `TrackRecorder` cho AI, không có
-vòng dò im lặng để đoán lúc AI nói xong. Chỉ đoạn ghi của **người học** mới được lưu mặc định — nghe
+Phần **transcribe tiếng người học không phụ thuộc mode**: cả hai đều chạy `whisper-1` với cùng
+`prompt` chống bịa, và audio của học viên đều đi thẳng lên Realtime qua WebRTC. Mode chỉ đổi đường
+tiếng AI **đi ra**.
+
+Hệ quả trong tài liệu này: các diagram mô tả mode `polly`. Mode `openai` có thêm một media track
+chiều về — nhưng vẫn **không** có vòng dò im lặng: "AI nói xong" lấy từ event
+`output_audio_buffer.stopped` (chỉ có trên WebRTC, phát sau `response.done` khi server đã xả hết
+buffer). Có `TrackRecorder` cho AI, nhưng chỉ khi bật công tắc "Lưu giọng AI" — mặc định tắt thì
+không có AudioWorklet nào chạy cho AI cả. Chỉ đoạn ghi của **người học** mới được lưu mặc định — nghe
 lại câu AI thì đọc lại bằng Polly.
 
 **2. Media đi thẳng client ↔ nhà cung cấp. Backend không nằm trên đường audio.** Đúng cho cả ba
@@ -192,7 +206,7 @@ sequenceDiagram
 
     BE->>BE: buildInstructions(lesson, {progress, resume, character})
     BE->>OAI: POST /v1/realtime/client_secrets
-    Note over BE,OAI: session: {instructions, tools, tool_choice:"auto",<br/>output_modalities:["text"],<br/>audio.input.transcription: whisper-1 + prompt,<br/>audio.input.turn_detection: null}<br/>KHÔNG có nhánh audio.output — giọng thuộc về Polly.
+    Note over BE,OAI: buildSessionPayload(voiceMode = session.voice_mode)<br/>session: {instructions, tools, tool_choice:"auto",<br/>audio.input.transcription: whisper-1 + prompt,<br/>audio.input.turn_detection: null}<br/>mode polly → output_modalities:["text"], KHÔNG có audio.output<br/>mode openai → output_modalities:["audio"] + audio.output:{voice, speed}
     OAI-->>BE: {value, expires_at}
 
     BE->>STS: AssumeRole {RoleArn, RoleSessionName: userId,<br/>DurationSeconds, Policy}

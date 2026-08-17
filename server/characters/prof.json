@@ -10,5 +10,6 @@
   "greetingStyle": "",
   "speed": 1.0,
   "voice": { "voiceId": "Brian", "engine": "neural" },
+  "openaiVoice": "sage",
   "avatar": { "skeleton": "/character/Prof/Prof.skel", "atlas": "/character/Prof/Prof.atlas.txt" }
 }

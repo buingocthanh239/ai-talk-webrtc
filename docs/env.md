@@ -106,12 +106,13 @@ ngoại lệ có chủ ý: `POLLY=on` mà thiếu `POLLY_STS_ROLE_ARN` chỉ `co
 OPENAI_API_KEY=sk-...
 ```
 
-Xong. Audio nằm ở `data/audio/`, AI hiện chữ không có tiếng, hạn mức 5 phút/ngày/thiết bị.
+Xong. Audio nằm ở `data/audio/`, AI hiện chữ không có tiếng, hạn mức 2 tiếng/ngày/thiết bị.
 
-Muốn nới hạn mức lúc test — 5 phút hết rất nhanh:
+2 tiếng là mức để **test**. Trước khi mở cho người ngoài thì kéo xuống — nhất là vì mode giọng
+OpenAI đắt gấp ~2 lần mode Polly:
 
 ```dotenv
-DAILY_QUOTA_MS=3600000     # 1 giờ
+DAILY_QUOTA_MS=300000      # 5 phút
 ```
 
 `QUOTA_TZ_OFFSET_MS` là mốc cắt ngày, mặc định `25200000` (GMT+7). Đổi khi người dùng ở múi giờ
@@ -358,4 +359,4 @@ Không dòng nào trong số đó bắt được lỗi phía trình duyệt. Ba 
 | `POLLY_ENGINE=generative` → chết lúc khởi động | engine đó không trả speech marks nên không có viseme. Dùng `neural` |
 | Credential Polly chết giữa buổi | `POLLY_STS_BIND_IP=on` + người học đổi mạng. Client tự xin lại; nếu lặp lại liên tục thì backend đang sau proxy không đặt `X-Forwarded-For` → tắt biến này |
 | `$BIẾN_KHÁC` trong `.env` không nở ra | Node không khai triển biến. Viết giá trị đầy đủ |
-| Hạn mức hết sau vài phút demo | mặc định `DAILY_QUOTA_MS` là 5 phút/ngày/thiết bị |
+| Hạn mức hết giữa buổi test | mặc định `DAILY_QUOTA_MS` là 2 tiếng/ngày/thiết bị — nới thêm bằng chính biến đó |

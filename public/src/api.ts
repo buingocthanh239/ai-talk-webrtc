@@ -12,6 +12,7 @@ import type {
   Summary,
   TokenResponse,
   UploadGrant,
+  VoiceMode,
 } from '../../shared/types.ts';
 
 /**
@@ -62,10 +63,10 @@ export const api = {
 
   listCharacters: () => request<CharacterList>('/api/characters'),
 
-  startSession: (lessonId: string, characterCode?: string) =>
-    request<{ sessionId: string; lesson: Lesson; character: Character }>(
+  startSession: (lessonId: string, characterCode?: string, voiceMode?: VoiceMode) =>
+    request<{ sessionId: string; lesson: Lesson; character: Character; voiceMode: VoiceMode }>(
       '/api/sessions',
-      json('POST', { lessonId, characterCode })
+      json('POST', { lessonId, characterCode, voiceMode })
     ),
 
   getSession: (id: string) => request<SessionDetail>(`/api/sessions/${id}`),

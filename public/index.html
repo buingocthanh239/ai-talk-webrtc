@@ -32,6 +32,29 @@
       </section>
 
       <section>
+        <h2>Chọn chế độ giọng AI</h2>
+        <p class="meta">
+          Chọn trước khi bắt đầu — mode khoá cho cả buổi, giữa chừng không đổi được.
+        </p>
+        <div id="voice-mode-list" class="character-grid">
+          <button class="character-card" data-voice-mode="openai">
+            <strong>Giọng OpenAI</strong>
+            <div class="tags"><span class="tag accent">Tốn tiền hơn ~2×</span></div>
+            <span class="meta">
+              Model tự nói, ngữ điệu thật và tự nhiên nhất. Đổi tốc độ chỉ ăn từ lượt sau.
+            </span>
+          </button>
+          <button class="character-card" data-voice-mode="polly">
+            <strong>Speech to text</strong>
+            <div class="tags"><span class="tag">Rẻ hơn</span></div>
+            <span class="meta">
+              OpenAI nghe audio và trả về chữ, Amazon Polly đọc. Đổi tốc độ ăn ngay giữa câu.
+            </span>
+          </button>
+        </div>
+      </section>
+
+      <section>
         <h2>Chọn bài học</h2>
         <div id="lesson-list" class="card-grid"></div>
       </section>
@@ -104,6 +127,7 @@
               Tắt: màn tổng kết đọc lại bằng Polly — tốn tiền mỗi lần bấm nghe, đổi lại
               có luôn khẩu hình. Bật: lưu mp3, nghe lại không tốn thêm.
             </p>
+            <p id="save-audio-note" class="meta"></p>
           </details>
 
           <!-- Tren dien thoai panel nay gap lai (main.ts dong san) de nhuong
@@ -156,12 +180,15 @@
                 <span class="dot"></span><span id="mic-label">Đang kết nối…</span>
               </div>
               <span id="quota-clock" class="quota-clock hidden"></span>
-              <!-- Khong con `disabled`: toc do gio la playbackRate cua the
-                   <audio> nen doi duoc ngay ca giua chung mot cau. -->
+              <!-- Khong con `disabled` o mode 'polly': toc do la playbackRate
+                   cua the <audio> nen doi duoc ngay ca giua chung mot cau. Mode
+                   'openai' thi slider van keo duoc, nhung an tu luot sau —
+                   `speed-note` noi ro dieu do. -->
               <label class="speed-control" for="speed-range">
                 <span class="speed-label">Tốc độ AI</span>
                 <input id="speed-range" type="range" min="0.25" max="1.5" step="0.05" value="1" />
                 <output id="speed-value" class="speed-value">1.0×</output>
+                <span id="speed-note" class="meta"></span>
               </label>
               <button id="btn-hint" class="ghost-btn">💡 Gợi ý</button>
               <button id="btn-finish" class="primary-btn" disabled>Kết thúc bài học</button>

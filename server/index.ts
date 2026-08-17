@@ -13,14 +13,17 @@ import type {
   PollyGrant,
   ProgressRecord,
   Quota,
+  VoiceMode,
 } from '../shared/types.ts';
+import { normalizeVoiceMode } from '../shared/voice-mode.ts';
+import { clampSpeed } from '../shared/speed.ts';
 
 import * as db from './db.ts';
 import { AUDIO_DIR } from './db.ts';
 import * as audio from './audio-store.ts';
-import { buildInstructions, buildResumeContext, buildTranscriptionPrompt } from './prompt.ts';
+import { buildResumeContext } from './prompt.ts';
 import type { ResumeContext } from './prompt.ts';
-import { buildTools } from './tools.ts';
+import { buildSessionPayload } from './realtime-session.ts';
 import { gradeSession } from './grader.ts';
 import { pollyConfigFromEnv } from './polly.ts';
 import { pollyGrant as mintPollyGrant, pollyCredsFromEnv, usesSts } from './sts.ts';
@@ -315,72 +318,39 @@ function serveStatic(res: ServerResponse, filePath: string): void {
 /**
  * Mint ephemeral client secret.
  *
- * Toan bo cau hinh session (instructions, tools, VAD, transcription) duoc nhung
- * thang vao token o server. Browser chi nhan duoc mot chuoi secret ngan han va
- * khong sua duoc luat bai hoc.
+ * Toan bo cau hinh session (instructions, tools, VAD, transcription, mode
+ * giong) duoc nhung thang vao token o server. Browser chi nhan duoc mot chuoi
+ * secret ngan han va khong sua duoc luat bai hoc.
+ *
+ * Hinh dang cua `session` nam o `realtime-session.ts` de test duoc mot minh.
  */
 async function mintClientSecret({
   lesson,
   progress,
   resume,
   character,
+  voiceMode,
 }: {
   lesson: Lesson;
   progress: ProgressRecord[];
   resume: ResumeContext | null;
   character: Character;
+  voiceMode: VoiceMode;
 }): Promise<{ value: string; expiresAt: number; model: string }> {
   const model = process.env.REALTIME_MODEL || 'gpt-realtime';
 
-  const payload = {
-    session: {
-      type: 'realtime',
-      model,
-      instructions: buildInstructions(lesson, { progress, resume, character }),
-      // AI chi tra ve CHU. Tieng noi do client tu lay tu Amazon Polly.
-      //
-      // Ly do ban dau la khau hinh: Realtime API khong phat ra viseme/phoneme
-      // nao, con Polly tra thang speech marks. Ly do do da het — avatar gio
-      // nhep fake tu bien do audio (`public/src/fake-mouth.ts`) va khong can
-      // Polly noi gi ve am vi ca.
-      //
-      // Nhung quyet dinh thi khong doi, vi ly do CON LAI moi la ly do lon:
-      // TIEN. Cho OpenAI phat audio truc tiep lam tong hoa don gap ~2,1 lan —
-      // audio out dat gap ~2,9 lan Polly, va giong AI sinh ra con nam lai
-      // trong context de bi doc lai o moi luot sau. Xem `docs/cost.md` muc 6.
-      //
-      // Cai gia: mat prosody cua giong Realtime, va them mot vong goi Polly.
-      // Push-to-talk nen khong mat gi ve ngat loi — khong co barge-in de mat.
-      output_modalities: ['text'],
-      audio: {
-        input: {
-          // whisper-1 chu khong phai gpt-4o-transcribe: gpt-4o-transcribe la
-          // model LLM, no rut gon va don dep loi hoc vien truoc khi tra chu ve
-          // ("I want to order a cup of coffee. I like a cappuccino" -> "I wanna
-          // order a coffee"). Voi app luyen noi thi do la mat du lieu: chinh cai
-          // loi bi don di moi la thu can cham.
-          //
-          // Doi lai whisper bia dat tren doan ghi ngan, va `prompt` la thuoc
-          // giai duy nhat o day — Realtime API khong nhan `temperature`.
-          transcription: {
-            model: 'whisper-1',
-            language: 'en',
-            prompt: buildTranscriptionPrompt(lesson),
-          },
-          // Push-to-talk: tat VAD hoan toan. Server khong doan luot noi va
-          // khong tu tao response nua — client la noi duy nhat chot mot luot,
-          // bang input_audio_buffer.commit + response.create gui tay khi user
-          // tha nut. Bat VAD lai la AI se tu noi khi nghe thay tieng vong loa.
-          turn_detection: null,
-        },
-        // Khong con nhanh `output`: giong va toc do gio thuoc ve Polly. Toc do
-        // la `playbackRate` cua the <audio> nen doi duoc GIUA CHUNG mot cau,
-        // thu ma session.update cua Realtime API khong bao gio cho.
-      },
-      tools: buildTools(lesson),
-      tool_choice: 'auto',
-    },
-  };
+  const payload = buildSessionPayload({
+    model,
+    lesson,
+    progress,
+    resume,
+    character,
+    voiceMode,
+    // Toc do khoi diem cua mode `openai`. Slider cua nguoi hoc chua toi duoc
+    // server, nen client gui `session.update` ngay sau khi bat tay neu no dang
+    // de khac — xem `public/src/session.ts::#applyRate`.
+    speed: clampSpeed(lesson.speed) * character.speed,
+  });
 
   const res = await fetch('https://api.openai.com/v1/realtime/client_secrets', {
     method: 'POST',
@@ -569,7 +539,7 @@ const routes: Route[] = [
     method: 'POST',
     pattern: /^\/api\/sessions$/,
     handler: async (req, _params, res) => {
-      const { lessonId, characterCode } = await readJSON(req);
+      const { lessonId, characterCode, voiceMode } = await readJSON(req);
       if (!lessons.has(lessonId)) throw new HttpError(400, 'lessonId khong hop le');
 
       // Chan o SERVER chu khong an nut o client: nut an di thi mot request
@@ -582,8 +552,19 @@ const routes: Route[] = [
         });
       }
 
-      const session = db.createSession(randomUUID(), lessonId, deviceId(req, res), character.code);
-      return { sessionId: session.id, lesson: lessons.get(lessonId), character };
+      // Chot MOT LAN o day cho ca buoi. Mode khong doi giua chung: doi no la
+      // doi output_modalities, ma cai do chi cai lai duoc bang mot lan bat tay
+      // WebRTC moi — va nua buoi hoc mot giong cung khong phai thu ai muon.
+      const mode = normalizeVoiceMode(voiceMode);
+
+      const session = db.createSession(
+        randomUUID(),
+        lessonId,
+        deviceId(req, res),
+        character.code,
+        mode
+      );
+      return { sessionId: session.id, lesson: lessons.get(lessonId), character, voiceMode: mode };
     },
   },
 
@@ -746,11 +727,15 @@ const routes: Route[] = [
       }
 
       const character = characterOr(session.character_code);
+      // Doc tu DB chu khong tu request: mode la thu client khong duoc phep
+      // doi giua buoi, cung ly do voi instructions.
+      const voiceMode = normalizeVoiceMode(session.voice_mode);
       const secret = await mintClientSecret({
         lesson,
         progress,
         resume: resumeContext,
         character,
+        voiceMode,
       });
       return {
         clientSecret: secret.value,
@@ -764,8 +749,12 @@ const routes: Route[] = [
         // Ky MOT LAN cho ca buoi. Han 1 tieng, dai hon moi buoi hoc, nen client
         // khong phai hoi lai giua chung — do la ca diem cua viec cap credential
         // thay vi ky tung cau.
+        //
+        // Cap o CA HAI mode: mode `openai` khong dung Polly de noi trong buoi,
+        // nhung man tong ket van co nut "doc lai" chay bang Polly.
         pollyGrant: await pollyGrantFor(req, session.user_id, character),
         character,
+        voiceMode,
       };
     },
   },

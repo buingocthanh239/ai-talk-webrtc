@@ -10,5 +10,6 @@
   "greetingStyle": "",
   "speed": 1.0,
   "voice": { "voiceId": "Matthew", "engine": "neural" },
+  "openaiVoice": "verse",
   "avatar": { "skeleton": "/character/Marco/Marco.skel", "atlas": "/character/Marco/Marco.atlas.txt" }
 }

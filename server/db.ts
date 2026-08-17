@@ -10,7 +10,9 @@ import type {
   Quota,
   Role,
   Summary,
+  VoiceMode,
 } from '../shared/types.ts';
+import { VOICE_MODE_DEFAULT } from '../shared/voice-mode.ts';
 
 // ---------------------------------------------------------------- hang DB
 //
@@ -30,6 +32,11 @@ export interface SessionRow {
   summary_json: string | null;
   /** `code` cua nhan vat AI. Rong = buoi hoc tao truoc khi co nhan vat. */
   character_code: string;
+  /**
+   * `openai` | `polly`. Rong = buoi hoc tao truoc khi co hai mode; doc qua
+   * `normalizeVoiceMode()` la roi ve `polly`, dung hanh vi cu.
+   */
+  voice_mode: string;
 }
 
 export interface CallRow {
@@ -93,7 +100,8 @@ CREATE TABLE IF NOT EXISTS session (
   end_reason   TEXT,
   hint_count   INTEGER NOT NULL DEFAULT 0,
   summary_json TEXT,
-  character_code TEXT NOT NULL DEFAULT ''
+  character_code TEXT NOT NULL DEFAULT '',
+  voice_mode   TEXT NOT NULL DEFAULT ''      -- openai | polly
 );
 
 CREATE TABLE IF NOT EXISTS message (
@@ -146,21 +154,27 @@ CREATE INDEX IF NOT EXISTS idx_call_user ON call(user_id, started_at);
   }
 }
 
-// Nhan vat AI. Buoi hoc cu khong co cot nay; de trong roi de `characterOr()`
-// roi ve mac dinh, hon la nhet san mot code co the bien mat khi doi file.
+// Nhan vat AI va mode giong. Buoi hoc cu khong co hai cot nay; de trong roi de
+// `characterOr()` / `normalizeVoiceMode()` roi ve mac dinh, hon la nhet san
+// mot gia tri co the bien mat khi doi file.
 {
   const columns = db.prepare(`SELECT name FROM pragma_table_info('session')`).all() as unknown as {
     name: string;
   }[];
-  if (!columns.some((c) => c.name === 'character_code')) {
+  const has = (name: string): boolean => columns.some((c) => c.name === name);
+
+  if (!has('character_code')) {
     db.exec(`ALTER TABLE session ADD COLUMN character_code TEXT NOT NULL DEFAULT ''`);
+  }
+  if (!has('voice_mode')) {
+    db.exec(`ALTER TABLE session ADD COLUMN voice_mode TEXT NOT NULL DEFAULT ''`);
   }
 }
 
 const q = {
   createSession: db.prepare(
-    `INSERT INTO session (id, lesson_id, user_id, started_at, character_code)
-     VALUES (?, ?, ?, ?, ?)`
+    `INSERT INTO session (id, lesson_id, user_id, started_at, character_code, voice_mode)
+     VALUES (?, ?, ?, ?, ?, ?)`
   ),
   getSession: db.prepare(`SELECT * FROM session WHERE id = ?`),
   listSessions: db.prepare(
@@ -224,9 +238,10 @@ export function createSession(
   id: string,
   lessonId: string,
   userId = 'demo-user',
-  characterCode = ''
+  characterCode = '',
+  voiceMode: VoiceMode = VOICE_MODE_DEFAULT
 ): SessionRow {
-  q.createSession.run(id, lessonId, userId, now(), characterCode);
+  q.createSession.run(id, lessonId, userId, now(), characterCode, voiceMode);
   const session = getSession(id);
   // Vua INSERT xong ma doc lai khong thay thi DB da hong that su — nga ra
   // ngay con hon tra ve null roi de cho goi phai doan.
@@ -312,8 +327,15 @@ export function listProgress(sessionId: string): ProgressRecord[] {
 
 // ------------------------------------------------------------ han muc goi
 
-/** Han muc mien phi moi ngay, tinh bang thoi gian ket noi that. */
-export const DAILY_QUOTA_MS = Number(process.env.DAILY_QUOTA_MS ?? 5 * 60 * 1000);
+/**
+ * Han muc mien phi moi ngay, tinh bang thoi gian ket noi that.
+ *
+ * 2 tieng la muc de TEST, khong phai muc cho nguoi dung that: no du de ngoi
+ * thu ca hai mode giong trong mot buoi lam viec ma khong phai sua env giua
+ * chung. Truoc khi mo cho nguoi ngoai, keo xuong bang `DAILY_QUOTA_MS` —
+ * rieng mode `openai` dat gap ~2 lan, nen 2 tieng o do la mot hoa don that.
+ */
+export const DAILY_QUOTA_MS = Number(process.env.DAILY_QUOTA_MS ?? 2 * 60 * 60 * 1000);
 
 /** Lech mui gio dung de cat ngay. Mac dinh gio Viet Nam. */
 const TZ_OFFSET_MS = Number(process.env.QUOTA_TZ_OFFSET_MS ?? 7 * 60 * 60 * 1000);

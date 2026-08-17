@@ -212,8 +212,19 @@ phần còn lại là 2.571 token audio của AI bị đọc đi đọc lại nh
 > nó vào cache lúc sinh, chi phí là $0.255 — vẫn cao hơn phương án A **1,4 lần** ở riêng phần
 > realtime, và vẫn mất viseme.
 
-**Kết luận:** giữ Polly. Cái mất duy nhất là prosody của giọng Realtime — audio-out không rẻ hơn ở
-bất kỳ kịch bản nào, kể cả khi bỏ hẳn viseme.
+**Kết luận:** Polly là **mặc định**. Audio-out không rẻ hơn ở bất kỳ kịch bản nào, kể cả khi bỏ
+hẳn viseme; cái nó đổi lại là prosody của giọng Realtime.
+
+Nhưng "mặc định" chứ không còn là "duy nhất". Cả hai đường giờ đều chạy được, người học chọn một
+lần lúc bắt đầu bài — `shared/voice-mode.ts`, cột `session.voice_mode`:
+
+| Mode | Đường tiếng | Buổi 5 phút | Mất gì |
+|---|---|---|---|
+| `polly` (mặc định) | OpenAI trả chữ → client gọi Polly | **$0.179** | prosody, thêm một vòng gọi |
+| `openai` | OpenAI tự phát audio qua WebRTC | **$0.379** | đổi tốc độ chỉ ăn từ lượt sau |
+
+Bảng A/B ngay trên chính là hai dòng này. **Bật `openai` cho cả người dùng thật là nhân hoá đơn
+lên 2,1 lần** — nó có để nghe thử và để so, không phải để mặc định.
 
 ---
 

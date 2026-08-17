@@ -142,9 +142,34 @@ khoá lúc AI đang nói và thay đổi bị xếp hàng chờ. Cả cơ chế 
 làm AI chọn từ dễ hơn hay ngắt nghỉ nhiều hơn — muốn vậy thì phải viết vào `instructions`
 (`server/prompt.ts`). Nói chậm mà câu vẫn phức tạp thì gần như không giúp được người mới học.
 
-## Tiếng nói của AI trong hội thoại (Polly, gọi thẳng từ client)
+## Hai mode, người học chọn lúc bắt đầu bài
 
-Session Realtime chạy `output_modalities: ["text"]` — **OpenAI chỉ nghe và trả về chữ.** Client gom
+Chọn **một lần**, mode khoá cho cả buổi (cột `session.voice_mode`, giữa chừng không đổi — kể cả
+reconnect hay học tiếp buổi cũ). Mode chỉ đổi đường tiếng AI **đi ra**; chiều lên thì hai mode
+giống hệt nhau.
+
+| Mode | Đường tiếng AI | Giá | Đánh đổi |
+|---|---|---|---|
+| **Speech to text** (`polly`, mặc định) | OpenAI trả chữ → client gọi thẳng Polly | 1× | mất prosody của giọng Realtime |
+| **Giọng OpenAI** (`openai`) | OpenAI tự phát audio qua WebRTC | **~2,1×** | đổi tốc độ chỉ ăn từ lượt sau |
+
+Code rẽ nhánh bằng `aiSpeaksItself()` (`shared/voice-mode.ts`) chứ không so tên mode ở từng chỗ.
+
+**Cả hai mode giữ nguyên** việc transcribe tiếng người học bằng `whisper-1` — bong bóng chữ và chấm
+phát âm không phụ thuộc mode. Hình dạng session ở `server/realtime-session.ts`; giá ở
+[`docs/cost.md`](docs/cost.md) mục 6.
+
+**"AI nói xong" là sự kiện chắc chắn ở cả hai mode**, không phải suy đoán: `polly` là hàng đợi đọc
+cạn, `openai` là event `output_audio_buffer.stopped` (chỉ có trên WebRTC).
+
+**Ghi âm.** Tiếng người học được ghi ở cả hai mode (`TrackRecorder` trên mic, chạy trên một
+`AudioContext` riêng, không dính gì tới WebRTC). Tiếng AI thì theo công tắc "Lưu giọng AI", mặc
+định tắt: mode `polly` gom mp3 từ Polly, mode `openai` dựng thêm một `TrackRecorder` trên stream
+WebRTC — chỉ dựng khi công tắc bật, vì nó là một AudioWorklet chạy suốt buổi.
+
+### Mode `polly` — chi tiết
+
+Session chạy `output_modalities: ["text"]` — **OpenAI chỉ nghe và trả về chữ.** Client gom
 chữ thành từng khúc, tự ký SigV4 và gọi thẳng Amazon Polly lấy mp3 kèm viseme, rồi tự phát.
 
 ```
@@ -280,7 +305,7 @@ các bẫy đã gặp: [`docs/env.md`](docs/env.md).
 | `GRADER_TEXT_MODEL` | `gpt-4o` | chấm grammar/vocab/mục tiêu |
 | `GRADER_AUDIO_MODEL` | `gpt-4o-audio-preview` | để trống = tắt chấm phát âm |
 | `PORT` | `3000` | |
-| `DAILY_QUOTA_MS` | `300000` | thời lượng gọi miễn phí mỗi thiết bị mỗi ngày (5 phút) |
+| `DAILY_QUOTA_MS` | `7200000` | thời lượng gọi miễn phí mỗi thiết bị mỗi ngày (2 tiếng — mức để test) |
 | `QUOTA_TZ_OFFSET_MS` | `25200000` | mốc reset hạn mức, lệch so với UTC (GMT+7) |
 | `AUDIO_STORE` | `disk` | `s3` = client đẩy thẳng lên bucket |
 | `S3_REGION` / `S3_BUCKET` | — | bắt buộc khi `AUDIO_STORE=s3` |

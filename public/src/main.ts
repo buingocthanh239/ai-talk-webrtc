@@ -17,8 +17,10 @@ import type {
   Role,
   SessionDetail,
   Summary,
+  VoiceMode,
 } from '../../shared/types.ts';
 import { clampSpeed } from '../../shared/speed.ts';
+import { aiSpeaksItself, normalizeVoiceMode } from '../../shared/voice-mode.ts';
 
 /**
  * Thieu mot phan tu trong index.html la loi lap trinh, khong phai tinh huong
@@ -52,6 +54,14 @@ const screens = {
 let talkAvatar: TalkAvatar | null = null;
 /** Dung nap hai lan khi reconnect — moi lan connect deu bao lai nhan vat. */
 let talkAvatarLoading = false;
+/**
+ * Asset avatar cua nhan vat, giu tam giua hai handler.
+ *
+ * `character` biet bundle nhung chua biet mode; `voiceMode` biet mode nhung
+ * khong biet bundle. Avatar phai doi ca hai vi no voi vao dung nguon audio nao
+ * la tuy mode.
+ */
+let pendingAvatar: AvatarBundle | null = null;
 
 /** `catch (err)` cho ra `unknown` duoi strict — boc mot lan o day. */
 const errorMessage = (err: unknown): string =>
@@ -107,6 +117,7 @@ async function loadHome(): Promise<void> {
   ]);
 
   renderQuotaNotice(quota);
+  renderVoiceModePicker();
 
   const list = $('lesson-list');
   list.replaceChildren(
@@ -394,6 +405,30 @@ function renderSpeed(value: number): void {
 
 const CHARACTER_KEY = 'ai-learn:character';
 const SAVE_AUDIO_KEY = 'ai-learn:save-ai-audio';
+const VOICE_MODE_KEY = 'ai-learn:voice-mode';
+
+/**
+ * Mode giong cho buoi TIEP THEO.
+ *
+ * Chi la lua chon dang cho: cai chot cho mot buoi la cot `voice_mode` ben
+ * server, va buoi dang chay doc mode cua chinh no tu token. Doi o day khong
+ * dong toi buoi nao dang mo.
+ */
+function chosenVoiceMode(): VoiceMode {
+  return normalizeVoiceMode(localStorage.getItem(VOICE_MODE_KEY));
+}
+
+function renderVoiceModePicker(): void {
+  const chosen = chosenVoiceMode();
+  for (const card of $('voice-mode-list').querySelectorAll<HTMLButtonElement>('[data-voice-mode]')) {
+    const mode = normalizeVoiceMode(card.dataset.voiceMode);
+    card.classList.toggle('active', mode === chosen);
+    card.onclick = () => {
+      localStorage.setItem(VOICE_MODE_KEY, mode);
+      renderVoiceModePicker();
+    };
+  }
+}
 
 /**
  * Danh sach nhan vat, nap mot lan luc mo trang.
@@ -466,6 +501,25 @@ $<HTMLInputElement>('save-audio').onchange = (e) => {
   active?.setSaveAiAudio(enabled);
 };
 
+/**
+ * Bao mode cua buoi dang chay, va noi ro nhung cho mode do hanh xu khac.
+ *
+ * Cong tac "Luu giong AI" chay o CA BA mode, nhung bang hai co che khac nhau:
+ * mode 'polly' gom mp3 tu Polly, hai mode kia ghi thang tu stream WebRTC. Ghi
+ * tu stream thi ton mot AudioWorklet chay suot buoi, nen no chi dung khi cong
+ * tac bat — do la ly do cau ghi chu ben duoi noi ro cai gia.
+ */
+function renderVoiceModeBadge(mode: VoiceMode): void {
+  const box = $<HTMLInputElement>('save-audio');
+  box.disabled = false;
+  box.checked = storedSaveAudio();
+
+  $('save-audio-note').textContent = aiSpeaksItself(mode)
+    ? 'Ở mode này, bật sẽ ghi thẳng tiếng AI từ WebRTC — tốn thêm một chút CPU suốt buổi.'
+    : '';
+  $('speed-note').textContent = aiSpeaksItself(mode) ? 'Tốc độ ăn từ lượt sau.' : '';
+}
+
 // ------------------------------------------------------ avatar hoi thoai
 
 /**
@@ -477,7 +531,10 @@ $<HTMLInputElement>('save-audio').onchange = (e) => {
  * Goi lai moi lan bat tay (ke ca reconnect) nen phai chan dung hai lan — mot
  * lan reconnect giua buoi la du de co hai avatar cung ve len mot canvas.
  */
-async function mountTalkAvatar(bundle: AvatarBundle | null): Promise<void> {
+async function mountTalkAvatar(
+  bundle: AvatarBundle | null,
+  stream: MediaStream | null
+): Promise<void> {
   if (talkAvatar || talkAvatarLoading) return;
   talkAvatarLoading = true;
   try {
@@ -488,6 +545,7 @@ async function mountTalkAvatar(bundle: AvatarBundle | null): Promise<void> {
       note: $('talk-avatar-note'),
       bars: $('talk-bars'),
       audio: $<HTMLAudioElement>('ai-audio'),
+      stream,
       bundle,
     });
   } catch (err) {
@@ -584,7 +642,11 @@ async function startLesson(lesson: Lesson): Promise<void> {
 
   let sessionId;
   try {
-    ({ sessionId } = await api.startSession(lesson.id, chosenCharacter()?.code));
+    ({ sessionId } = await api.startSession(
+      lesson.id,
+      chosenCharacter()?.code,
+      chosenVoiceMode()
+    ));
   } catch (err) {
     setBanner(`Không tạo được buổi học: ${errorMessage(err)}`, 'error');
     return;
@@ -718,14 +780,24 @@ async function runSession({
 
       character(character) {
         renderCharacterBadge(character);
-        void mountTalkAvatar(character.avatar);
+        // Avatar KHONG dung o day: no phai biet mode truoc khi voi vao audio,
+        // va `character` den truoc khi bat tay xong. Dung bundle lai, mount o
+        // handler `voiceMode` ngay duoi.
+        pendingAvatar = character.avatar;
+      },
+
+      voiceMode(mode, stream) {
+        void mountTalkAvatar(pendingAvatar, stream);
+        renderVoiceModeBadge(mode);
       },
 
       quotaExhausted() {
         stopQuotaClock();
         setPttUi('locked');
+        // Khong ghi con so vao day: han muc la DAILY_QUOTA_MS ben server, doi
+        // duoc bang env, va mot con so chet o day se thanh loi noi doi.
         setBanner(
-          'Đã hết 5 phút miễn phí hôm nay. Buổi học được giữ nguyên — mai bạn bấm “Tiếp tục” để học tiếp.',
+          'Đã hết thời lượng miễn phí hôm nay. Buổi học được giữ nguyên — mai bạn bấm “Tiếp tục” để học tiếp.',
           'warn'
         );
         $<HTMLButtonElement>('btn-finish').disabled = false;
